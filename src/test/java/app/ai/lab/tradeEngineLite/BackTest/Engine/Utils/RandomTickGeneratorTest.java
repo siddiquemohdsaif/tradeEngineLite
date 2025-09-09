@@ -28,6 +28,33 @@ class RandomTickGeneratorTest {
         for (RandomTickGenerator.TickData t : ticks) {
             assertEquals(startPrice, t.price, 0.0);
         }
+
+        // 👇 Print the ticks
+        for (RandomTickGenerator.TickData t : ticks) {
+            System.out.printf("tick @ %d ms -> price=%.4f%n", t.timestamp, t.price);
+        }
+    }
+
+
+    @Test
+    void generatesExpectedTicksWithoutVariation_v2() {
+        long start = 1757166616450L;
+        long end = start + 1000_000L; // 1 second range
+        long tickDuration = 100L;
+        double startPrice = 100.0;
+
+        RandomTickGenerator gen = new RandomTickGenerator(start, end, tickDuration,
+                -1, startPrice, 1, 1);
+
+        List<RandomTickGenerator.TickData> ticks = gen.generateAll();
+
+        int expectedCount = (int) ((end - start) / tickDuration) + 1;
+        assertEquals(expectedCount, ticks.size(), "tick count");
+
+        // 👇 Print the ticks
+        for (RandomTickGenerator.TickData t : ticks) {
+            System.out.printf("tick @ %d ms -> price=%.4f%n", t.timestamp, t.price);
+        }
     }
 }
 

@@ -15,8 +15,16 @@ class CandleGraphTrackerTest {
     void generatesCandleGraphFromTicks() throws IOException {
         System.setProperty("java.awt.headless", "true");
 
+        // Fixed output directory on Windows
+        Path outDir = Path.of("D:", "SpringBoot project", "Trade", "output files");
+        Files.createDirectories(outDir); // make sure it exists
+
+        // (Optional) start clean so assertions don't pass from stale files
+        Files.deleteIfExists(outDir.resolve("1_TEST.json"));
+        Files.deleteIfExists(outDir.resolve("1_TEST.png"));
+
         long start = 1757166616450L;
-        long end = start + 1_000L; // 1 second range
+        long end = start + 10_000_000L; // 1 second range
         long tickDuration = 100L;
         double startPrice = 100.0;
 
@@ -37,11 +45,11 @@ class CandleGraphTrackerTest {
             tracker.addMarketData(t.timestamp, t.price);
         }
 
-        Path outDir = Files.createTempDirectory("candle-graph");
+        // Save outputs to the fixed directory
         tracker.drawCandleGraph(outDir.toString());
 
         Path json = outDir.resolve("1_TEST.json");
-        Path img = outDir.resolve("1_TEST.png");
+        Path img  = outDir.resolve("1_TEST.png");
         assertTrue(Files.exists(json), "volatility json");
         assertTrue(Files.exists(img), "graph image");
 
