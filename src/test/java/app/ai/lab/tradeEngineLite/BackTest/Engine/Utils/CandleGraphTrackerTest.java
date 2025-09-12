@@ -2,6 +2,8 @@ package app.ai.lab.tradeEngineLite.BackTest.Engine.Utils;
 
 import org.junit.jupiter.api.Test;
 
+import app.ai.lab.tradeEngineLite.GraphUtils.CandleGraphTracker;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
