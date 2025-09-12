@@ -150,7 +150,7 @@ public class RSIGraphTracker {
         writeImageWithFallback(new File(outputDir + baseName + ".png"), img);
     }
 
-    private void saveRsiJson(String path) throws IOException {
+    public void saveRsiJson(String path) throws IOException {
         ObjectMapper mapper = new ObjectMapper();
         mapper.enable(SerializationFeature.INDENT_OUTPUT);
         mapper.writeValue(new File(path), rsiSeries);
