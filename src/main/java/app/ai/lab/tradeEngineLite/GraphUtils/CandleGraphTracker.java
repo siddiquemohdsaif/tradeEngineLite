@@ -146,6 +146,11 @@ public class CandleGraphTracker {
         this.tradingsymbol = tradingsymbol;
     }
 
+    public CandleGraphTracker(int id, String tradingsymbol, long candleTimeFrameSeconds) {
+        this(id, tradingsymbol);
+        this.candleTimeFrameMs = candleTimeFrameSeconds * 1000L;
+    }
+
     // ===== Public API =====
 
     /** Add a market tick (ms since epoch, price). */
@@ -713,6 +718,10 @@ public class CandleGraphTracker {
 
     public void setCandleTimeFrameMs(long candleTimeFrameMs) {
         this.candleTimeFrameMs = candleTimeFrameMs;
+    }
+
+    public void setCandleTimeFrameSeconds(long seconds) {
+        this.candleTimeFrameMs = seconds * 1000L;
     }
 
     public void setTargetYTicks(int targetYTicks) {
