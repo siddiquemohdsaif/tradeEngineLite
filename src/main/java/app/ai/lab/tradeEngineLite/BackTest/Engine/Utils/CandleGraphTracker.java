@@ -19,6 +19,9 @@ import javax.imageio.ImageIO;
  * Direct port of the Rust CandleGraphTracker to Java for Spring Boot usage.
  * - Add market ticks via addMarketData(timeMs, price)
  * - Call drawCandleGraph(outputDir) to render a large PNG/BMP and save a JSON with volatility info.
+ * - Polished axes:
+ *    * Y-axis uses “nice” round ticks (1–2–5 × 10^k) and adds N minor lines between majors (default 9).
+ *    * X-axis draws vertical grid lines at each labeled tick (or a custom every-k-candles cadence).
  */
 public class CandleGraphTracker {
 
@@ -123,7 +126,7 @@ public class CandleGraphTracker {
 
     public int id;
     public String tradingsymbol;
-    public long candleTimeFrameMs = 900_000; // 15m default (same as Rust default)
+    public long candleTimeFrameMs = 900_000; // 15m default
     public final List<Candle> candles = new ArrayList<>();
     public final List<MarketPoint> marketGraph = new ArrayList<>();
     public final List<Wave> waves30 = new ArrayList<>();
@@ -131,6 +134,12 @@ public class CandleGraphTracker {
 
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final DateTimeFormatter ID_FMT = DateTimeFormatter.ofPattern("hh:mma").withLocale(Locale.ENGLISH);
+
+    // ===== Y/X axis polish knobs =====
+    private int targetYTicks = 10;             // desired number of MAJOR Y ticks
+    private int yMinorBetweenMajors = 9;       // draw this many MINOR lines between majors (default 9 => 10 slices)
+    private double yPadFractionOfMid = 0.10;   // ±10% of mid-price as padding
+    private Integer xGridEveryCandles = null;  // if set, draw vertical grid every K candles; else uses label spacing
 
     public CandleGraphTracker(int id, String tradingsymbol) {
         this.id = id;
@@ -172,12 +181,26 @@ public class CandleGraphTracker {
                 return;
             }
 
-            double maxPrice = candles.stream().mapToDouble(c -> c.high).max().orElse(1d);
-            double minPrice = candles.stream().mapToDouble(c -> c.low).min().orElse(0d);
-            if (maxPrice == minPrice) {
-                maxPrice += 1.0;
-                minPrice -= 1.0;
+            // Raw data bounds
+            double dataMax = candles.stream().mapToDouble(c -> c.high).max().orElse(1d);
+            double dataMin = candles.stream().mapToDouble(c -> c.low).min().orElse(0d);
+            if (dataMax == dataMin) {
+                dataMax += 1.0;
+                dataMin -= 1.0;
             }
+
+            // Add symmetric padding based on mid-price (default 10%)
+            double padAbs = (dataMax - dataMin) * yPadFractionOfMid;
+            double range = dataMax - dataMin;
+            if (padAbs < range * 0.05) padAbs = range * 0.05; // ensure some minimum padding
+            double paddedMin = dataMin - padAbs;
+            double paddedMax = dataMax + padAbs;
+
+            // Compute nice min/max/step for Y axis
+            NiceScale yscale = new NiceScale(paddedMin, paddedMax, targetYTicks);
+            double yMinPlot = yscale.niceMin;
+            double yMaxPlot = yscale.niceMax;
+            double yStep    = yscale.tickSpacing;
 
             // Margins & plot area
             int marginLeft = 120;
@@ -194,39 +217,63 @@ public class CandleGraphTracker {
             g.setFont(g.getFont().deriveFont(Font.BOLD, 48f));
             g.drawString("Candle Graph", marginLeft, 60);
 
-            // Axes
+            // Axes border
             g.setColor(new Color(220, 220, 220));
             g.drawRect(plotX, plotY, plotW, plotH);
 
-            // Y ticks
+            // ---- Y major ticks + labels
             g.setFont(g.getFont().deriveFont(Font.PLAIN, 20f));
-            g.setColor(Color.GRAY);
-            int yTicks = 10;
-            for (int i = 0; i <= yTicks; i++) {
-                double t = i / (double) yTicks;
-                int y = plotY + (int) Math.round(plotH - t * plotH);
-                g.setColor(new Color(235, 235, 235));
+            int majorCount = (int)Math.round((yMaxPlot - yMinPlot) / yStep);
+            for (int k = 0; k <= majorCount; k++) {
+                double value = yMinPlot + k * yStep;
+                int y = yToPixel(value, yMinPlot, yMaxPlot, plotY, plotH);
+                // Major grid line
+                g.setColor(new Color(200, 200, 200));
                 g.drawLine(plotX, y, plotX + plotW, y);
+                // Label
                 g.setColor(Color.DARK_GRAY);
-                double price = minPrice + (maxPrice - minPrice) * t;
-                String label = String.format(Locale.ENGLISH, "%.2f", price);
+                String label = formatTickLabel(value, yStep);
                 g.drawString(label, 10, y + 6);
             }
 
-            // X labels (candleId) — draw sparsely to avoid crowding
+            // ---- Y minor grid lines (9 between each pair of majors by default)
+            if (yMinorBetweenMajors > 0) {
+                g.setColor(new Color(230, 230, 230)); // lighter than major grids
+                for (int k = 0; k < majorCount; k++) {
+                    double base = yMinPlot + k * yStep;
+                    for (int j = 1; j <= yMinorBetweenMajors; j++) {
+                        double v = base + (yStep * (j / (double)(yMinorBetweenMajors + 1)));
+                        int y = yToPixel(v, yMinPlot, yMaxPlot, plotY, plotH);
+                        g.drawLine(plotX, y, plotX + plotW, y);
+                    }
+                }
+            }
+
+            // X labels cadence — draw sparsely to avoid crowding
             int n = candles.size();
-            int every = Math.max(1, n / 30);
+            int labelEvery = Math.max(1, n / 30);
+
+            // ---- X vertical grid lines
+            // Use either user-defined cadence or label cadence
+            int xEvery = (xGridEveryCandles != null && xGridEveryCandles > 0) ? xGridEveryCandles : labelEvery;
+            g.setColor(new Color(200, 200, 200));
+            for (int i = 0; i < n; i += xEvery) {
+                double x = xToPixel(i + 0.5, n, plotX, plotW);
+                g.drawLine((int) x, plotY, (int) x, plotY + plotH);
+            }
+
+            // X tick marks + labels at bottom
             g.setColor(Color.DARK_GRAY);
-            for (int i = 0; i < n; i += every) {
+            for (int i = 0; i < n; i += labelEvery) {
                 double x = xToPixel(i + 0.5, n, plotX, plotW);
                 g.drawLine((int) x, plotY + plotH, (int) x, plotY + plotH + 6);
                 String label = candles.get(i).candleId;
                 drawCentered(g, label, (int) x, plotY + plotH + 28);
             }
 
-            // Draw candles (wicks + body)
+            // ---- Candles (wicks + body)
             Color green = new Color(76, 175, 80);
-            Color red = new Color(223, 81, 76);
+            Color red   = new Color(223, 81, 76);
 
             for (int i = 0; i < n; i++) {
                 Candle c = candles.get(i);
@@ -235,80 +282,79 @@ public class CandleGraphTracker {
 
                 // Wick
                 g.setColor(c.candleType == CandleType.Green ? green : red);
-                int yLow = yToPixel(c.low, minPrice, maxPrice, plotY, plotH);
-                int yHigh = yToPixel(c.high, minPrice, maxPrice, plotY, plotH);
+                int yLow  = yToPixel(c.low,  yMinPlot, yMaxPlot, plotY, plotH);
+                int yHigh = yToPixel(c.high, yMinPlot, yMaxPlot, plotY, plotH);
                 g.drawLine((int) xMid, yLow, (int) xMid, yHigh);
 
                 // Body
                 double top = Math.max(c.open, c.close);
                 double bottom = Math.min(c.open, c.close);
-                int yTop = yToPixel(top, minPrice, maxPrice, plotY, plotH);
-                int yBottom = yToPixel(bottom, minPrice, maxPrice, plotY, plotH);
+                int yTop = yToPixel(top,    yMinPlot, yMaxPlot, plotY, plotH);
+                int yBot = yToPixel(bottom, yMinPlot, yMaxPlot, plotY, plotH);
 
                 int bodyW = Math.max(2, (int) Math.round(plotW / (double) n * 0.6));
                 int xLeft = (int) xMid - bodyW / 2;
-                int hBody = Math.max(1, yBottom - yTop);
+                int hBody = Math.max(1, yBot - yTop);
 
                 g.fillRect(xLeft, yTop, bodyW, hBody);
             }
 
-            // Moving averages
-            // Colors mirror your Rust code (approx)
+            // ---- Moving averages
             Color m60 = new Color(0, 165, 83);
             Color m30 = new Color(255, 0, 0);
             Color m10 = new Color(233, 8, 140);
             Color m5  = new Color(0, 175, 237);
             Color m3  = new Color(50, 50, 50);
 
-            drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, minPrice, maxPrice, c -> c.mavg3, 2f, m3);
-            drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, minPrice, maxPrice, c -> c.mavg5, 2f, m5);
-            drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, minPrice, maxPrice, c -> c.mavg10, 2f, m10);
-            drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, minPrice, maxPrice, c -> c.mavg60, 2f, m60);
-            drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, minPrice, maxPrice, c -> c.mavg30, 2f, m30);
+            drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, yMinPlot, yMaxPlot, c -> c.mavg3,  2f, m3);
+            drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, yMinPlot, yMaxPlot, c -> c.mavg5,  2f, m5);
+            drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, yMinPlot, yMaxPlot, c -> c.mavg10, 2f, m10);
+            drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, yMinPlot, yMaxPlot, c -> c.mavg60, 2f, m60);
+            drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, yMinPlot, yMaxPlot, c -> c.mavg30, 2f, m30);
 
-            // Waves (30)
+            // ---- Waves (30)
             g.setColor(m30);
             for (Wave w : waves30) {
                 int idx = indexOfTimestamp(candles, w.timestamp);
                 if (idx >= 0) {
                     double cx = idx + 0.5;
                     int x = (int) xToPixel(cx, n, plotX, plotW);
-                    int y = yToPixel(w.price, minPrice, maxPrice, plotY, plotH);
+                    int y = yToPixel(w.price, yMinPlot, yMaxPlot, plotY, plotH);
                     fillCircle(g, x, y, 6);
                 }
                 int recIdx = indexOfTimestamp(candles, w.recordTimestamp);
                 if (recIdx >= 0) {
                     double cx = recIdx + 0.5;
                     int x = (int) xToPixel(cx, n, plotX, plotW);
-                    int y = yToPixel(candles.get(recIdx).mavg30, minPrice, maxPrice, plotY, plotH);
+                    int y = yToPixel(candles.get(recIdx).mavg30, yMinPlot, yMaxPlot, plotY, plotH);
                     g.setColor(Color.BLACK);
                     fillCircle(g, x, y, 6);
                     g.setColor(m30);
                 }
             }
 
-            // Waves (60)
+            // ---- Waves (60)
             g.setColor(m60);
             for (Wave w : waves60) {
                 int idx = indexOfTimestamp(candles, w.timestamp);
                 if (idx >= 0) {
                     double cx = idx + 0.5;
                     int x = (int) xToPixel(cx, n, plotX, plotW);
-                    int y = yToPixel(w.price, minPrice, maxPrice, plotY, plotH);
+                    int y = yToPixel(w.price, yMinPlot, yMaxPlot, plotY, plotH);
                     fillCircle(g, x, y, 6);
                 }
                 int recIdx = indexOfTimestamp(candles, w.recordTimestamp);
                 if (recIdx >= 0) {
                     double cx = recIdx + 0.5;
                     int x = (int) xToPixel(cx, n, plotX, plotW);
-                    int y = yToPixel(candles.get(recIdx).mavg60, minPrice, maxPrice, plotY, plotH);
+                    int y = yToPixel(candles.get(recIdx).mavg60, yMinPlot, yMaxPlot, plotY, plotH);
                     g.setColor(Color.BLACK);
                     fillCircle(g, x, y, 6);
                     g.setColor(m60);
                 }
             }
 
-            // Bollinger (lines + filled band)
+            // ---- Bollinger (lines + filled band)
             List<Double> bbM = new ArrayList<>(n);
             List<Double> bbU = new ArrayList<>(n);
             List<Double> bbL = new ArrayList<>(n);
@@ -319,9 +365,9 @@ public class CandleGraphTracker {
             }
 
             g.setColor(Color.BLACK);
-            drawSimpleLine(g, bbM, n, plotX, plotW, plotY, plotH, minPrice, maxPrice, 2f, Color.BLACK);
-            drawSimpleLine(g, bbU, n, plotX, plotW, plotY, plotH, minPrice, maxPrice, 2f, Color.BLACK);
-            drawSimpleLine(g, bbL, n, plotX, plotW, plotY, plotH, minPrice, maxPrice, 2f, Color.BLACK);
+            drawSimpleLine(g, bbM, n, plotX, plotW, plotY, plotH, yMinPlot, yMaxPlot, 2f, Color.BLACK);
+            drawSimpleLine(g, bbU, n, plotX, plotW, plotY, plotH, yMinPlot, yMaxPlot, 2f, Color.BLACK);
+            drawSimpleLine(g, bbL, n, plotX, plotW, plotY, plotH, yMinPlot, yMaxPlot, 2f, Color.BLACK);
 
             // Fill band (upper -> lower reversed)
             if (bbU.size() == bbL.size() && !bbU.isEmpty()) {
@@ -333,13 +379,13 @@ public class CandleGraphTracker {
                 boolean started = false;
                 for (int i = 0; i < n; i++) {
                     double x = xToPixel(i + 0.5, n, plotX, plotW);
-                    int y = yToPixel(bbU.get(i), minPrice, maxPrice, plotY, plotH);
+                    int y = yToPixel(bbU.get(i), yMinPlot, yMaxPlot, plotY, plotH);
                     if (!started) { poly.moveTo(x, y); started = true; }
                     else poly.lineTo(x, y);
                 }
                 for (int i = n - 1; i >= 0; i--) {
                     double x = xToPixel(i + 0.5, n, plotX, plotW);
-                    int y = yToPixel(bbL.get(i), minPrice, maxPrice, plotY, plotH);
+                    int y = yToPixel(bbL.get(i), yMinPlot, yMaxPlot, plotY, plotH);
                     poly.lineTo(x, y);
                 }
                 poly.closePath();
@@ -347,7 +393,7 @@ public class CandleGraphTracker {
                 g.setComposite(old);
             }
 
-            // Simple legend
+            // ---- Legend
             int lx = plotX + 20;
             int ly = plotY + 20;
             drawLegendEntry(g, lx, ly, m3,  "MA3");   ly += 28;
@@ -667,6 +713,70 @@ public class CandleGraphTracker {
 
     public void setCandleTimeFrameMs(long candleTimeFrameMs) {
         this.candleTimeFrameMs = candleTimeFrameMs;
+    }
+
+    public void setTargetYTicks(int targetYTicks) {
+        this.targetYTicks = Math.max(2, targetYTicks);
+    }
+
+    public void setYAxisPaddingFraction(double fraction) {
+        this.yPadFractionOfMid = Math.max(0.0, fraction);
+    }
+
+    /** How many minor lines to draw BETWEEN major Y ticks (default 9 => 10 slices). */
+    public void setYMinorTicksBetweenMajors(int count) {
+        this.yMinorBetweenMajors = Math.max(0, count);
+    }
+
+    /** Force vertical X-grid every K candles. If null/<=0, uses the label cadence. */
+    public void setXGridEveryCandles(Integer k) {
+        this.xGridEveryCandles = (k != null && k > 0) ? k : null;
+    }
+
+    // ===== “Nice” axis helper =====
+
+    // Produces round min/max and tick spacing like 60,70,80 or 100,120,140...
+    private static final class NiceScale {
+        final double niceMin, niceMax, tickSpacing;
+        final int ticks;
+
+        NiceScale(double dataMin, double dataMax, int targetTicks) {
+            if (dataMax < dataMin) { double t = dataMin; dataMin = dataMax; dataMax = t; }
+            double range = dataMax - dataMin;
+            if (range == 0) { range = Math.abs(dataMax) > 0 ? Math.abs(dataMax) * 0.1 : 1.0; }
+            double rawStep = range / Math.max(2, targetTicks - 1);
+            double step = niceNum(rawStep, true);
+            double nMin = Math.floor(dataMin / step) * step;
+            double nMax = Math.ceil (dataMax / step) * step;
+            this.niceMin = nMin;
+            this.niceMax = nMax;
+            this.tickSpacing = step;
+            this.ticks = (int)Math.round((nMax - nMin) / step);
+        }
+
+        private static double niceNum(double x, boolean round) {
+            double exp = Math.floor(Math.log10(x));
+            double f = x / Math.pow(10.0, exp);
+            double nf;
+            if (round) {
+                if (f < 1.5)      nf = 1.0;
+                else if (f < 3.0) nf = 2.0;
+                else if (f < 7.0) nf = 5.0;
+                else              nf = 10.0;
+            } else {
+                if (f <= 1.0)     nf = 1.0;
+                else if (f <= 2.) nf = 2.0;
+                else if (f <= 5.) nf = 5.0;
+                else              nf = 10.0;
+            }
+            return nf * Math.pow(10.0, exp);
+        }
+    }
+
+    private static String formatTickLabel(double value, double step) {
+        if (step >= 1) return String.format(Locale.ENGLISH, "%.0f", value);
+        int decimals = Math.max(0, (int)Math.ceil(-Math.log10(step)) + 1);
+        return String.format(Locale.ENGLISH, "%." + decimals + "f", value);
     }
 
     // ===== Example Spring Boot wiring =====
