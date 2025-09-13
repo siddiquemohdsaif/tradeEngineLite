@@ -72,16 +72,12 @@ public class Logicore {
                 // update graph/RSI
                 tracker.addMarketData(ts, price);
 
-                // feed virtual exchange so market orders get filled
-                oms.instrumentPriceFeed(instrumentId, price, price, price);
-
                 Double rsi = tracker.getRSILatest();
                 if (rsi == null) continue;
 
                 if (!inPosition) {
-                    if (rsi <= 25.0) {
+                    if (rsi <= 30.0) {
                         oms.createOrder(instrumentId, VirtualExchange.OrderType.BUY_M);
-                        oms.instrumentPriceFeed(instrumentId, price, price, price);
                         inPosition = true;
                         entryPrice = price;
                         entryTime = ts;
@@ -91,7 +87,6 @@ public class Logicore {
                     boolean stopHit = price <= entryPrice * 0.995;    // -0.5%
                     if (rsi >= 60.0 || targetHit || stopHit) {
                         oms.createOrder(instrumentId, VirtualExchange.OrderType.SELL_M);
-                        oms.instrumentPriceFeed(instrumentId, price, price, price);
                         inPosition = false;
                         double pnl = price - entryPrice;
                         totalProfit += pnl;

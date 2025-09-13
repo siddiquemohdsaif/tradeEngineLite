@@ -9,6 +9,8 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Date;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -35,17 +37,23 @@ class LogicoreNiftyBacktestTest {
 
         OrderManagementService oms = new OrderManagementService();
         Logicore logic = new Logicore(token, name, oms);
+        AtomicInteger added = new AtomicInteger();
 
         StreamHistoricalData streamer = new StreamHistoricalData(
                 root,
-                "05-09-25",
-                "05-09-25",
+                "01-08-25",
+                "12-09-25",
                 "NIFTY_100",
                 -1,
                 new StreamHistoricalData.BlockCallback() {
                     @Override
                     public boolean onBlock(Block block) {
                         logic.onBlock(block);
+                        oms.onBlock(block);
+                        int i = added.incrementAndGet();
+                        if (i%100 == 0) {
+                            System.err.println("tick-count: " + i + " time : "+ new Date(block.getTimeStamp()));
+                        }
                         return true;
                     }
 

@@ -239,7 +239,7 @@ public class VirtualExchange {
         String orderId = generateOrderId();
         order.setOrderId(orderId);
         orders.add(order);
-        activeInstruments.add(order.getInstrumentId());
+        trackInstrument(order.getInstrumentId());
         return orderId;
     }
 
@@ -250,7 +250,7 @@ public class VirtualExchange {
             if (Objects.equals(existing.getOrderId(), orderId)) {
                 newOrder.setOrderId(orderId);
                 orders.set(i, newOrder);
-                activeInstruments.add(newOrder.getInstrumentId());
+                trackInstrument(newOrder.getInstrumentId());
                 return true;
             }
         }
@@ -279,6 +279,13 @@ public class VirtualExchange {
     private String generateOrderId() {
         long id = Math.abs(random.nextLong()) % 1_000_000_000_000L;
         return String.format("%012d", id);
+    }
+
+    /** Adds the instrument to active set if not already present */
+    private void trackInstrument(int instrumentId) {
+        if (!activeInstruments.contains(instrumentId)) {
+            activeInstruments.add(instrumentId);
+        }
     }
 }
 
