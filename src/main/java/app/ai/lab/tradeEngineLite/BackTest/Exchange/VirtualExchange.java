@@ -1,12 +1,15 @@
 package app.ai.lab.tradeEngineLite.BackTest.Exchange;
 
+import app.ai.lab.tradeEngineLite.BackTest.Engine.HistoricalData.Block;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.function.Consumer;
 
 /**
@@ -122,6 +125,7 @@ public class VirtualExchange {
     }
 
     private final List<Order> orders = new CopyOnWriteArrayList<>();
+    private final Set<Integer> activeInstruments = new CopyOnWriteArraySet<>();
     private Consumer<OrderResponse> feedOrderStatusCallback;
     private final long virtualOrderDelay;
     private final Random random = new Random();
@@ -176,6 +180,10 @@ public class VirtualExchange {
 
         orders.removeAll(executedOrders);
 
+        if (orders.stream().noneMatch(o -> o.getInstrumentId() == instrumentId)) {
+            activeInstruments.remove(instrumentId);
+        }
+
         if (feedOrderStatusCallback != null) {
             for (Order order : executedOrders) {
                 if (virtualOrderDelay > 0) {
@@ -197,11 +205,41 @@ public class VirtualExchange {
         }
     }
 
+    /**
+     * Convenience method that processes a {@link Block} and forwards contained
+     * price information to {@link #instrumentPriceFeed(int, double, double, double)}.
+     * Both {@link Block.IndexPacket} and {@link Block.StockPacket} are supported.
+     */
+    public void onBlock(Block block) {
+        if (block == null || block.getInfo() == null) {
+            return;
+        }
+
+        if (activeInstruments.isEmpty()) {
+            return;
+        }
+
+        for (Block.PacketData pd : block.getInfo()) {
+            if (pd instanceof Block.IndexPacket ip) {
+                int token = (int) ip.getToken();
+                if (!activeInstruments.contains(token)) continue;
+                double price = ip.getLastTradedPrice() / 100.0;
+                instrumentPriceFeed(token, price, price, price);
+            } else if (pd instanceof Block.StockPacket sp) {
+                int token = (int) sp.getInstrumentToken();
+                if (!activeInstruments.contains(token)) continue;
+                double price = sp.getLastTradedPrice() / 100.0;
+                instrumentPriceFeed(token, price, price, price);
+            }
+        }
+    }
+
     /** Place a new order into the exchange and return its ID. */
     public String placeOrder(Order order) {
         String orderId = generateOrderId();
         order.setOrderId(orderId);
         orders.add(order);
+        activeInstruments.add(order.getInstrumentId());
         return orderId;
     }
 
@@ -212,6 +250,7 @@ public class VirtualExchange {
             if (Objects.equals(existing.getOrderId(), orderId)) {
                 newOrder.setOrderId(orderId);
                 orders.set(i, newOrder);
+                activeInstruments.add(newOrder.getInstrumentId());
                 return true;
             }
         }
@@ -220,7 +259,21 @@ public class VirtualExchange {
 
     /** Cancel an order from the exchange. */
     public boolean cancelOrder(String orderId) {
-        return orders.removeIf(o -> Objects.equals(o.getOrderId(), orderId));
+        Integer instrumentId = null;
+        for (Order o : orders) {
+            if (Objects.equals(o.getOrderId(), orderId)) {
+                instrumentId = o.getInstrumentId();
+                break;
+            }
+        }
+        boolean removed = orders.removeIf(o -> Objects.equals(o.getOrderId(), orderId));
+        if (removed && instrumentId != null) {
+            final int id = instrumentId;
+            if (orders.stream().noneMatch(o -> o.getInstrumentId() == id)) {
+                activeInstruments.remove(id);
+            }
+        }
+        return removed;
     }
 
     private String generateOrderId() {

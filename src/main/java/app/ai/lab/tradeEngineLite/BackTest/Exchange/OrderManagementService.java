@@ -1,5 +1,6 @@
 package app.ai.lab.tradeEngineLite.BackTest.Exchange;
 
+import app.ai.lab.tradeEngineLite.BackTest.Engine.HistoricalData.Block;
 import org.springframework.stereotype.Service;
 
 import java.util.function.BiConsumer;
@@ -67,5 +68,10 @@ public class OrderManagementService {
     /** Forward price feed data to the underlying exchange. */
     public void instrumentPriceFeed(int instrumentId, double priceLtp, double priceAsk, double priceBid) {
         exchange.instrumentPriceFeed(instrumentId, priceLtp, priceAsk, priceBid);
+    }
+
+    /** Forward a historical data block to the exchange. */
+    public void onBlock(Block block) {
+        exchange.onBlock(block);
     }
 }
