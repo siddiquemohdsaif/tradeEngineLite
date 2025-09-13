@@ -5,6 +5,7 @@ import app.ai.lab.tradeEngineLite.BackTest.Engine.HistoricalData.BlockUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -27,7 +28,7 @@ public class BlockUtilTest {
 
     @Test
     void binToJson_and_back() throws IOException {
-        assertTrue(Files.exists(BIN_PATH), "Input .bin not found: " + BIN_PATH);
+        Assumptions.assumeTrue(Files.exists(BIN_PATH), "Input .bin not found: " + BIN_PATH);
 
         // 1) Read .bin
         byte[] bin = Files.readAllBytes(BIN_PATH);
