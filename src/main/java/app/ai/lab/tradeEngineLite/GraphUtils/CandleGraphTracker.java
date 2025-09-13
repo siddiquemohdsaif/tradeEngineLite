@@ -22,6 +22,10 @@ import javax.imageio.ImageIO;
  * - Polished axes:
  *    * Y-axis uses “nice” round ticks (1–2–5 × 10^k) and adds N minor lines between majors (default 9).
  *    * X-axis draws vertical grid lines at each labeled tick (or a custom every-k-candles cadence).
+ * - Optional RSI:
+ *    * Enable via constructor overload with rsiPeriod.
+ *    * RSI computed from candle CLOSES, appended when a new candle starts (i.e., previous candle closes).
+ *    * If enabled, renders an RSI panel below the candles, sharing the same timeline.
  */
 public class CandleGraphTracker {
 
@@ -141,6 +145,34 @@ public class CandleGraphTracker {
     private double yPadFractionOfMid = 0.10;   // ±10% of mid-price as padding
     private Integer xGridEveryCandles = null;  // if set, draw vertical grid every K candles; else uses label spacing
 
+    // ===== Grid customization (NEW) =====
+    private Color gridMajorColor = new Color(200, 200, 200);
+    private Color gridMinorColor = new Color(230, 230, 230);
+    private Color axesBorderColor = new Color(220, 220, 220);
+    private float gridMajorStroke = 1.0f;
+    private float gridMinorStroke = 1.0f;
+
+    // ===== RSI state (optional) =====
+    // RSI grid (5% step) style
+    private boolean rsiShow5PctGrid = true;
+    private Color rsiGridMajorColor = new Color(210, 210, 210); // for 0,10,20,...,100
+    private Color rsiGridMinorColor = new Color(235, 235, 235); // for 5,15,25,....
+    private float rsiGridMajorStroke = 1.25f;
+    private float rsiGridMinorStroke = 1.0f;
+    private boolean rsiEnabled = false;
+    private int rsiPeriod = 14;
+    private Double rsiPrevClose = null;
+    private double rsiAvgGain = 0.0;
+    private double rsiAvgLoss = 0.0;
+    private int rsiInitCount = 0;     // number of diffs accumulated toward initial period
+    private boolean rsiInitialized = false;
+    private final List<Double> rsiValues = new ArrayList<>(); // aligned to candles: index i -> RSI for candle i (may be null)
+
+    // RSI render knobs
+    private Color rsiLineColor = new Color(33, 150, 243);    // blue-ish
+    private Color rsiLevelColor = new Color(200, 200, 200);  // 30/70 guides
+    private float rsiLineStroke = 2.0f;
+
     public CandleGraphTracker(int id, String tradingsymbol) {
         this.id = id;
         this.tradingsymbol = tradingsymbol;
@@ -149,6 +181,12 @@ public class CandleGraphTracker {
     public CandleGraphTracker(int id, String tradingsymbol, long candleTimeFrameSeconds) {
         this(id, tradingsymbol);
         this.candleTimeFrameMs = candleTimeFrameSeconds * 1000L;
+    }
+
+    /** Enable RSI via constructor overloading. */
+    public CandleGraphTracker(int id, String tradingsymbol, long candleTimeFrameSeconds, int rsiPeriod) {
+        this(id, tradingsymbol, candleTimeFrameSeconds);
+        enableRSI(rsiPeriod);
     }
 
     // ===== Public API =====
@@ -160,7 +198,14 @@ public class CandleGraphTracker {
         updateWaves(); // includes Bollinger updates
     }
 
-    /** Render chart and save a JSON with volatility info. */
+    public Double getRSILatest(){
+        if (rsiValues.size() < 2) {
+            return null;
+        }
+        return rsiValues.get(rsiValues.size()-2);
+    }
+
+    /** Render chart and save a JSON with volatility info. Also draws RSI panel if enabled. */
     public void drawCandleGraph(String outputDir) throws IOException {
         if (!outputDir.endsWith(File.separator)) {
             outputDir += File.separator;
@@ -173,6 +218,8 @@ public class CandleGraphTracker {
         // --- Prepare image ---
         final int width = 2560 * 8;   // 20480
         final int height = 1440 * 2;  // 2880
+
+        boolean hasRSIToDraw = rsiEnabled; // draw panel regardless of whether latest points are null; timeline still shared
 
         BufferedImage img = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = img.createGraphics();
@@ -207,33 +254,49 @@ public class CandleGraphTracker {
             double yMaxPlot = yscale.niceMax;
             double yStep    = yscale.tickSpacing;
 
-            // Margins & plot area
+            // Margins
             int marginLeft = 120;
             int marginRight = 40;
             int marginTop = 80;
             int marginBottom = 140;
+
+            // Panel layout
+            int gapBetweenPanels = hasRSIToDraw ? 40 : 0;
+            int rsiPanelHeight = hasRSIToDraw ? Math.min(640, (int)(height * 0.30)) : 0;
+
+            // Plot areas
             int plotX = marginLeft;
-            int plotY = marginTop;
             int plotW = width - marginLeft - marginRight;
-            int plotH = height - marginTop - marginBottom;
+
+            int candleAreaTop = marginTop;
+            int candleAreaHeight = height - marginTop - marginBottom - rsiPanelHeight - gapBetweenPanels;
+            int plotY = candleAreaTop;
+            int plotH = candleAreaHeight;
+
+            int rsiY = plotY + plotH + gapBetweenPanels;
+            int rsiH = rsiPanelHeight;
 
             // Title
             g.setColor(Color.BLACK);
             g.setFont(g.getFont().deriveFont(Font.BOLD, 48f));
             g.drawString("Candle Graph", marginLeft, 60);
 
-            // Axes border
-            g.setColor(new Color(220, 220, 220));
+            // Axes border (candles)
+            g.setColor(axesBorderColor);
             g.drawRect(plotX, plotY, plotW, plotH);
 
-            // ---- Y major ticks + labels
+            // ---- Y major ticks + labels (candles)
             g.setFont(g.getFont().deriveFont(Font.PLAIN, 20f));
             int majorCount = (int)Math.round((yMaxPlot - yMinPlot) / yStep);
+
+            Stroke oldStroke = g.getStroke();
+            // Major grid
+            g.setStroke(new BasicStroke(gridMajorStroke));
             for (int k = 0; k <= majorCount; k++) {
                 double value = yMinPlot + k * yStep;
                 int y = yToPixel(value, yMinPlot, yMaxPlot, plotY, plotH);
                 // Major grid line
-                g.setColor(new Color(200, 200, 200));
+                g.setColor(gridMajorColor);
                 g.drawLine(plotX, y, plotX + plotW, y);
                 // Label
                 g.setColor(Color.DARK_GRAY);
@@ -241,9 +304,10 @@ public class CandleGraphTracker {
                 g.drawString(label, 10, y + 6);
             }
 
-            // ---- Y minor grid lines (9 between each pair of majors by default)
+            // ---- Y minor grid lines (candles)
             if (yMinorBetweenMajors > 0) {
-                g.setColor(new Color(230, 230, 230)); // lighter than major grids
+                g.setStroke(new BasicStroke(gridMinorStroke));
+                g.setColor(gridMinorColor); // lighter than major grids
                 for (int k = 0; k < majorCount; k++) {
                     double base = yMinPlot + k * yStep;
                     for (int j = 1; j <= yMinorBetweenMajors; j++) {
@@ -253,27 +317,33 @@ public class CandleGraphTracker {
                     }
                 }
             }
+            g.setStroke(oldStroke);
 
             // X labels cadence — draw sparsely to avoid crowding
             int n = candles.size();
             int labelEvery = Math.max(1, n / 30);
 
-            // ---- X vertical grid lines
-            // Use either user-defined cadence or label cadence
+            // ---- X vertical grid lines (extend across both panels if RSI enabled)
             int xEvery = (xGridEveryCandles != null && xGridEveryCandles > 0) ? xGridEveryCandles : labelEvery;
-            g.setColor(new Color(200, 200, 200));
+            g.setColor(gridMajorColor);
+            g.setStroke(new BasicStroke(gridMajorStroke));
+            int gridTop = plotY;
+            int gridBottom = hasRSIToDraw ? (rsiY + rsiH) : (plotY + plotH);
             for (int i = 0; i < n; i += xEvery) {
                 double x = xToPixel(i + 0.5, n, plotX, plotW);
-                g.drawLine((int) x, plotY, (int) x, plotY + plotH);
+                g.drawLine((int) x, gridTop, (int) x, gridBottom);
             }
+            g.setStroke(oldStroke);
 
-            // X tick marks + labels at bottom
+            // ---- X tick marks + labels
             g.setColor(Color.DARK_GRAY);
+            int labelBaseY = hasRSIToDraw ? (rsiY + rsiH + 28) : (plotY + plotH + 28);
             for (int i = 0; i < n; i += labelEvery) {
                 double x = xToPixel(i + 0.5, n, plotX, plotW);
-                g.drawLine((int) x, plotY + plotH, (int) x, plotY + plotH + 6);
+                int tickTop = hasRSIToDraw ? (rsiY + rsiH) : (plotY + plotH);
+                g.drawLine((int) x, tickTop, (int) x, tickTop + 6);
                 String label = candles.get(i).candleId;
-                drawCentered(g, label, (int) x, plotY + plotH + 28);
+                drawCentered(g, label, (int) x, labelBaseY);
             }
 
             // ---- Candles (wicks + body)
@@ -398,7 +468,7 @@ public class CandleGraphTracker {
                 g.setComposite(old);
             }
 
-            // ---- Legend
+            // ---- Legend (top-left of candle panel)
             int lx = plotX + 20;
             int ly = plotY + 20;
             drawLegendEntry(g, lx, ly, m3,  "MA3");   ly += 28;
@@ -407,6 +477,63 @@ public class CandleGraphTracker {
             drawLegendEntry(g, lx, ly, m30, "MA30");  ly += 28;
             drawLegendEntry(g, lx, ly, m60, "MA60");  ly += 28;
             drawLegendEntry(g, lx, ly, Color.BLACK, "BB (M/U/L)"); ly += 28;
+
+            // ================= RSI PANEL =================
+            if (hasRSIToDraw) {
+                // Border
+                g.setColor(axesBorderColor);
+                g.drawRect(plotX, rsiY, plotW, rsiH);
+            
+                // --- Horizontal grid every 5 (0..100)
+                Stroke oldStroke2 = g.getStroke();
+                for (int v = 0; v <= 100; v += 5) {
+                    int yLine = rsiToPixel(v, rsiY, rsiH);
+                    boolean isMajor = (v % 10 == 0);
+                
+                    // g.setStroke(new BasicStroke(isMajor ? rsiGridMajorStroke : rsiGridMinorStroke));
+                    // g.setColor(isMajor ? rsiGridMajorColor : rsiGridMinorColor);
+                    // g.drawLine(plotX, yLine, plotX + plotW, yLine);
+
+                    if (v == 50) {
+                        g.setColor(new Color(150, 150, 150));
+                        g.setStroke(new BasicStroke(rsiGridMajorStroke*1.5f));
+
+                    }else if (v == 20 || v == 80) {
+                        g.setColor(new Color(220, 0, 0));
+                        g.setStroke(new BasicStroke(rsiGridMajorStroke));
+                    }else {
+                        g.setColor(new Color(230, 230, 230));
+                        g.setStroke(new BasicStroke(rsiGridMinorStroke));
+                    }
+                    g.drawLine(plotX, yLine, plotX + plotW, yLine);
+
+                    // label the majors (every 10%) to avoid clutter
+                    if (isMajor) {
+                        g.setColor(Color.DARK_GRAY);
+                        g.setFont(g.getFont().deriveFont(Font.PLAIN, 16f));
+                        String lbl = String.valueOf(v);
+                        g.drawString(lbl, 10, yLine + 5); // left margin labels
+                    }
+                }
+                g.setStroke(oldStroke2);
+            
+                // Emphasize the classic 30/70 levels over the grid (optional)
+                int rsi30y = rsiToPixel(0, rsiY, rsiH);
+                int rsi70y = rsiToPixel(100, rsiY, rsiH);
+                oldStroke = g.getStroke();
+                g.setStroke(new BasicStroke(rsiGridMajorStroke * 2));
+                g.setColor(new Color(100,100,100));
+                g.drawLine(plotX, rsi30y, plotX + plotW, rsi30y);
+                g.drawLine(plotX, rsi70y, plotX + plotW, rsi70y);
+                g.setStroke(oldStroke);
+            
+                // RSI line (aligned to candle indices)
+                List<Double> rsiSeriesAligned = rsiAlignedToCandles(n);
+                drawSimpleLine(g, rsiSeriesAligned, n, plotX, plotW, rsiY, rsiH, 0.0, 100.0, rsiLineStroke, rsiLineColor);
+            
+                // RSI legend
+                drawLegendEntry(g, plotX + 20, rsiY + 24, rsiLineColor, "RSI(" + rsiPeriod + ")");
+            }
 
         } finally {
             g.dispose();
@@ -445,7 +572,7 @@ public class CandleGraphTracker {
             if (last.timestamp == candleTs) {
                 // Update existing candle
                 if (price > last.high) last.high = price;
-                if (price < last.low) last.low = price;
+                if (price < last.low)  last.low  = price;
 
                 last.close = price;
                 last.totalLength = last.high - last.low;
@@ -457,6 +584,10 @@ public class CandleGraphTracker {
                 double body = Math.abs(last.close - last.open);
                 last.volatility = body + 0.5 * last.vix;
             } else {
+                // New candle is starting => previous candle just CLOSED.
+                // If RSI enabled, compute RSI on the previous candle CLOSE and align to its index.
+                if (rsiEnabled) maybeAddRsiOnCandleClose();
+
                 // New candle
                 createNewCandle(candleTs, candleId, price, completePercent);
             }
@@ -512,6 +643,15 @@ public class CandleGraphTracker {
                     price, price, price, price, price,
                     0.0
             ));
+        }
+
+        // Ensure RSI vector stays aligned: append a placeholder for the NEW (open) candle.
+        if (rsiEnabled) {
+            // We only compute RSI for closed candles. The newly opened candle has no RSI yet.
+            // So keep rsiValues size == candles size by adding a null placeholder for this candle.
+            while (rsiValues.size() < candles.size()) {
+                rsiValues.add(null);
+            }
         }
     }
 
@@ -612,6 +752,97 @@ public class CandleGraphTracker {
         last.bollinger = new BollingerBands(middle, upper, lower);
     }
 
+    // ===== RSI helpers =====
+
+    /** Enable RSI computation and drawing. Safe to call at construction. */
+    public void enableRSI(int period) {
+        this.rsiEnabled = true;
+        this.rsiPeriod = Math.max(2, period);
+        // keep existing state if re-enabled; call resetRSI() first if needed
+    }
+
+    /** Optional: clear RSI state if you want to restart computation. */
+    public void resetRSI() {
+        rsiPrevClose = null;
+        rsiAvgGain = 0.0;
+        rsiAvgLoss = 0.0;
+        rsiInitCount = 0;
+        rsiInitialized = false;
+        rsiValues.clear();
+        // Pre-fill to current candles size with nulls to keep alignment
+        for (int i = 0; i < candles.size(); i++) rsiValues.add(null);
+    }
+
+    /** Called exactly when a new candle starts -> previous candle is closed. */
+    private void maybeAddRsiOnCandleClose() {
+        if (!rsiEnabled || candles.isEmpty()) return;
+
+        Candle prev = candles.get(candles.size() - 1);
+        double close = prev.close;
+
+        // First close initializes prevClose and produces a null RSI (no diff yet)
+        if (rsiPrevClose == null) {
+            rsiPrevClose = close;
+            ensureRsiAlignmentForClosedIndex(candles.size() - 1, null);
+            return;
+        }
+
+        double change = close - rsiPrevClose;
+        double gain = Math.max(change, 0.0);
+        double loss = Math.max(-change, 0.0);
+
+        if (!rsiInitialized) {
+            // Accumulate initial period-1 diffs; on reaching period, emit first RSI
+            rsiAvgGain += gain;
+            rsiAvgLoss += loss;
+            rsiInitCount += 1;
+
+            if (rsiInitCount >= rsiPeriod) {
+                rsiAvgGain /= rsiPeriod;
+                rsiAvgLoss /= rsiPeriod;
+                rsiInitialized = true;
+                double rsi = computeCurrentRsi(rsiAvgGain, rsiAvgLoss);
+                ensureRsiAlignmentForClosedIndex(candles.size() - 1, rsi);
+            } else {
+                ensureRsiAlignmentForClosedIndex(candles.size() - 1, null);
+            }
+        } else {
+            // Wilder smoothing
+            rsiAvgGain = ((rsiAvgGain * (rsiPeriod - 1)) + gain) / rsiPeriod;
+            rsiAvgLoss = ((rsiAvgLoss * (rsiPeriod - 1)) + loss) / rsiPeriod;
+            double rsi = computeCurrentRsi(rsiAvgGain, rsiAvgLoss);
+            ensureRsiAlignmentForClosedIndex(candles.size() - 1, rsi);
+        }
+
+        rsiPrevClose = close;
+    }
+
+    private static double computeCurrentRsi(double avgGain, double avgLoss) {
+        if (avgLoss == 0.0) return 100.0;
+        double rs = avgGain / avgLoss;
+        return 100.0 - (100.0 / (1.0 + rs));
+    }
+
+    /** Ensure rsiValues[iClosed] is set, expanding/null-filling as needed to align with candles. */
+    private void ensureRsiAlignmentForClosedIndex(int closedIndex, Double value) {
+        while (rsiValues.size() < candles.size()) rsiValues.add(null);
+        // closedIndex should be within bounds (last candle before new one was appended)
+        if (closedIndex >= 0 && closedIndex < rsiValues.size()) {
+            rsiValues.set(closedIndex, value);
+        }
+    }
+
+    /** Build a series length=n (candles) with RSI values/nulls aligned to indices. */
+    private List<Double> rsiAlignedToCandles(int n) {
+        if (!rsiEnabled) return Collections.nCopies(n, null);
+        List<Double> out = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            Double v = (i < rsiValues.size()) ? rsiValues.get(i) : null;
+            out.add(v);
+        }
+        return out;
+    }
+
     // ===== Helper draw/math =====
 
     private static void drawLegendEntry(Graphics2D g, int x, int y, Color color, String label) {
@@ -637,6 +868,12 @@ public class CandleGraphTracker {
     private static int yToPixel(double price, double min, double max, int plotY, int plotH) {
         double t = (price - min) / (max - min);
         return plotY + (int) Math.round(plotH - t * plotH);
+    }
+
+    private static int rsiToPixel(double value, int plotY, int plotH) {
+        // RSI is 0..100
+        double norm = value / 100.0;
+        return plotY + (int) Math.round(plotH - norm * plotH);
     }
 
     private static void drawCentered(Graphics2D g, String text, int cx, int y) {
@@ -665,7 +902,7 @@ public class CandleGraphTracker {
             List<Double> series,
             int n,
             int plotX, int plotW, int plotY, int plotH,
-            double minPrice, double maxPrice,
+            double minVal, double maxVal,
             float strokeWidth,
             Color color
     ) {
@@ -679,7 +916,9 @@ public class CandleGraphTracker {
             Double v = series.get(i);
             if (v == null) continue;
             double x = xToPixel(i + 0.5, n, plotX, plotW);
-            int y = yToPixel(v, minPrice, maxPrice, plotY, plotH);
+            int y = (maxVal == minVal)
+                    ? plotY + plotH / 2
+                    : (int) Math.round(plotY + plotH - ((v - minVal) / (maxVal - minVal)) * plotH);
             if (!started) { path.moveTo(x, y); started = true; }
             else { path.lineTo(x, y); }
         }
@@ -742,6 +981,24 @@ public class CandleGraphTracker {
         this.xGridEveryCandles = (k != null && k > 0) ? k : null;
     }
 
+    /** Customize grid colors & thickness. */
+    public void setGridStyle(Color majorColor, float majorStrokeWidth,
+                             Color minorColor, float minorStrokeWidth,
+                             Color borderColor) {
+        if (majorColor != null) this.gridMajorColor = majorColor;
+        if (minorColor != null) this.gridMinorColor = minorColor;
+        if (borderColor != null) this.axesBorderColor = borderColor;
+        if (majorStrokeWidth > 0) this.gridMajorStroke = majorStrokeWidth;
+        if (minorStrokeWidth > 0) this.gridMinorStroke = minorStrokeWidth;
+    }
+
+    /** Customize RSI line & levels. */
+    public void setRsiStyle(Color lineColor, float lineStrokeWidth, Color levelColor) {
+        if (lineColor != null) this.rsiLineColor = lineColor;
+        if (lineStrokeWidth > 0) this.rsiLineStroke = lineStrokeWidth;
+        if (levelColor != null) this.rsiLevelColor = levelColor;
+    }
+
     // ===== “Nice” axis helper =====
 
     // Produces round min/max and tick spacing like 60,70,80 or 100,120,140...
@@ -791,7 +1048,7 @@ public class CandleGraphTracker {
     // ===== Example Spring Boot wiring =====
     // @Service
     // public static class CandleService {
-    //     private final CandleGraphTracker tracker = new CandleGraphTracker(1, "NIFTY");
+    //     private final CandleGraphTracker tracker = new CandleGraphTracker(1, "NIFTY", 60L, 14);
     //     public void onTick(long epochMs, double price) { tracker.addMarketData(epochMs, price); }
     //     public void render(String dir) throws IOException { tracker.drawCandleGraph(dir); }
     // }

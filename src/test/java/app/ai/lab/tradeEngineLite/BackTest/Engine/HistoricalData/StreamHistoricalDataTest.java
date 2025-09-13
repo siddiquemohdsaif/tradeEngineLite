@@ -173,12 +173,13 @@ class StreamHistoricalDataTest {
         Files.deleteIfExists(outDir.resolve(token + "_" + name + ".json"));
         Files.deleteIfExists(outDir.resolve(token + "_" + name + ".png"));
 
-        CandleGraphTracker tracker = new CandleGraphTracker(token, name);
+        CandleGraphTracker tracker = new CandleGraphTracker(token, name, 300);
+        tracker.enableRSI(14);
         AtomicInteger added = new AtomicInteger();
 
         StreamHistoricalData streamer = new StreamHistoricalData(
                 root,
-                "04-09-25",
+                "05-09-25",
                 "05-09-25",
                 "NIFTY_100",
                 -1, // no delay
@@ -218,7 +219,7 @@ class StreamHistoricalDataTest {
                     }
 
                     @Override public void onEnd() {
-                        System.out.println("Stream ended. Total ticks added: " + added.get());
+                        System.out.println("Stream ended. Total ticks added: " + added.get() + ", rsiLast:" + tracker.getRSILatest());
                     }
                 }
         );
