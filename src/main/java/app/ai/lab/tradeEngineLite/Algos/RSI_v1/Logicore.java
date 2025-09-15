@@ -53,7 +53,7 @@ public class Logicore {
         this.instrumentId = instrumentId;
         this.name = name;
         this.oms = oms;
-        this.tracker = new CandleGraphTracker(instrumentId, name, 300);
+        this.tracker = new CandleGraphTracker(instrumentId, name, 86400);
         this.tracker.enableRSI(rsiPeriod);
     }
 

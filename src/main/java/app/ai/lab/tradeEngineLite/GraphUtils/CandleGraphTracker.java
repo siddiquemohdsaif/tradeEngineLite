@@ -145,12 +145,19 @@ public class CandleGraphTracker {
     private double yPadFractionOfMid = 0.10;   // ±10% of mid-price as padding
     private Integer xGridEveryCandles = null;  // if set, draw vertical grid every K candles; else uses label spacing
 
-    // ===== Grid customization (NEW) =====
+    // ===== Grid customization =====
     private Color gridMajorColor = new Color(200, 200, 200);
     private Color gridMinorColor = new Color(230, 230, 230);
     private Color axesBorderColor = new Color(220, 220, 220);
     private float gridMajorStroke = 1.0f;
     private float gridMinorStroke = 1.0f;
+
+    // ===== Day separator (NEW) =====
+    private Color daySeparatorColor = new Color(200, 200, 200);
+    private float daySeparatorStroke = 1.5f; // thicker than grid
+    private Font daySeparatorFont = new Font("SansSerif", Font.BOLD, 20);
+    private static final DateTimeFormatter DAY_FMT =
+            DateTimeFormatter.ofPattern("dd-MM-yy").withLocale(Locale.ENGLISH);
 
     // ===== RSI state (optional) =====
     // RSI grid (5% step) style
@@ -335,16 +342,56 @@ public class CandleGraphTracker {
             }
             g.setStroke(oldStroke);
 
-            // ---- X tick marks + labels
-            g.setColor(Color.DARK_GRAY);
-            int labelBaseY = hasRSIToDraw ? (rsiY + rsiH + 28) : (plotY + plotH + 28);
-            for (int i = 0; i < n; i += labelEvery) {
-                double x = xToPixel(i + 0.5, n, plotX, plotW);
-                int tickTop = hasRSIToDraw ? (rsiY + rsiH) : (plotY + plotH);
-                g.drawLine((int) x, tickTop, (int) x, tickTop + 6);
-                String label = candles.get(i).candleId;
-                drawCentered(g, label, (int) x, labelBaseY);
+            // ---- Day separators (NEW): draw at the first candle of each day and label "dd-MM-yy"
+            List<Integer> dayStarts = new ArrayList<>();
+            LocalDate lastDate = null;
+            for (int i = 0; i < n; i++) {
+                long ts = candles.get(i).timestamp;
+                LocalDate d = Instant.ofEpochMilli(ts).atZone(IST).toLocalDate();
+                if (lastDate == null || !d.equals(lastDate)) {
+                    dayStarts.add(i);
+                    lastDate = d;
+                }
             }
+
+            if (dayStarts.size() >= 2) { // only useful if we have multiple days
+                Stroke prevStroke = g.getStroke();
+                Font prevFont = g.getFont();
+                g.setStroke(new BasicStroke(daySeparatorStroke));
+                g.setFont(daySeparatorFont);
+                g.setColor(daySeparatorColor);
+
+                for (int idx : dayStarts) {
+                    double x = xToPixel(idx + 0.5, n, plotX, plotW);
+
+                    // Vertical day line across candle + RSI panels (if present)
+                    g.drawLine((int) x, gridTop, (int) x, gridBottom);
+
+                    // Date label, centered beneath the existing x-axis labels
+                    String dayLabel = DAY_FMT.format(Instant.ofEpochMilli(candles.get(idx).timestamp).atZone(IST));
+                    int labelY = (hasRSIToDraw ? (rsiY + rsiH + 28) : (plotY + plotH + 28)) + 22;
+                    g.setColor(Color.DARK_GRAY);
+                    drawCentered(g, dayLabel, (int) x, labelY);
+                    g.setColor(daySeparatorColor);
+                }
+
+                g.setStroke(prevStroke);
+                g.setFont(prevFont);
+            }
+
+            if (candleTimeFrameMs < 86400_000) {
+                // ---- X tick marks + labels
+                g.setColor(Color.DARK_GRAY);
+                int labelBaseY = hasRSIToDraw ? (rsiY + rsiH + 28) : (plotY + plotH + 28);
+                for (int i = 0; i < n; i += labelEvery) {
+                    double x = xToPixel(i + 0.5, n, plotX, plotW);
+                    int tickTop = hasRSIToDraw ? (rsiY + rsiH) : (plotY + plotH);
+                    g.drawLine((int) x, tickTop, (int) x, tickTop + 6);
+                    String label = candles.get(i).candleId;
+                    drawCentered(g, label, (int) x, labelBaseY);
+                }
+            }
+
 
             // ---- Candles (wicks + body)
             Color green = new Color(76, 175, 80);
@@ -483,25 +530,20 @@ public class CandleGraphTracker {
                 // Border
                 g.setColor(axesBorderColor);
                 g.drawRect(plotX, rsiY, plotW, rsiH);
-            
+
                 // --- Horizontal grid every 5 (0..100)
                 Stroke oldStroke2 = g.getStroke();
                 for (int v = 0; v <= 100; v += 5) {
                     int yLine = rsiToPixel(v, rsiY, rsiH);
                     boolean isMajor = (v % 10 == 0);
-                
-                    // g.setStroke(new BasicStroke(isMajor ? rsiGridMajorStroke : rsiGridMinorStroke));
-                    // g.setColor(isMajor ? rsiGridMajorColor : rsiGridMinorColor);
-                    // g.drawLine(plotX, yLine, plotX + plotW, yLine);
 
                     if (v == 50) {
                         g.setColor(new Color(150, 150, 150));
-                        g.setStroke(new BasicStroke(rsiGridMajorStroke*1.5f));
-
-                    }else if (v == 20 || v == 80) {
+                        g.setStroke(new BasicStroke(rsiGridMajorStroke * 1.5f));
+                    } else if (v == 20 || v == 80) {
                         g.setColor(new Color(220, 0, 0));
                         g.setStroke(new BasicStroke(rsiGridMajorStroke));
-                    }else {
+                    } else {
                         g.setColor(new Color(230, 230, 230));
                         g.setStroke(new BasicStroke(rsiGridMinorStroke));
                     }
@@ -516,21 +558,21 @@ public class CandleGraphTracker {
                     }
                 }
                 g.setStroke(oldStroke2);
-            
-                // Emphasize the classic 30/70 levels over the grid (optional)
-                int rsi30y = rsiToPixel(0, rsiY, rsiH);
-                int rsi70y = rsiToPixel(100, rsiY, rsiH);
+
+                // Emphasize the classic 30/70 levels over the grid (optional & corrected)
+                int rsi0y = rsiToPixel(0, rsiY, rsiH);
+                int rsi100y = rsiToPixel(100, rsiY, rsiH);
                 oldStroke = g.getStroke();
                 g.setStroke(new BasicStroke(rsiGridMajorStroke * 2));
                 g.setColor(new Color(100,100,100));
-                g.drawLine(plotX, rsi30y, plotX + plotW, rsi30y);
-                g.drawLine(plotX, rsi70y, plotX + plotW, rsi70y);
+                g.drawLine(plotX, rsi0y, plotX + plotW, rsi0y);
+                g.drawLine(plotX, rsi100y, plotX + plotW, rsi100y);
                 g.setStroke(oldStroke);
-            
+
                 // RSI line (aligned to candle indices)
                 List<Double> rsiSeriesAligned = rsiAlignedToCandles(n);
                 drawSimpleLine(g, rsiSeriesAligned, n, plotX, plotW, rsiY, rsiH, 0.0, 100.0, rsiLineStroke, rsiLineColor);
-            
+
                 // RSI legend
                 drawLegendEntry(g, plotX + 20, rsiY + 24, rsiLineColor, "RSI(" + rsiPeriod + ")");
             }
@@ -997,6 +1039,17 @@ public class CandleGraphTracker {
         if (lineColor != null) this.rsiLineColor = lineColor;
         if (lineStrokeWidth > 0) this.rsiLineStroke = lineStrokeWidth;
         if (levelColor != null) this.rsiLevelColor = levelColor;
+    }
+
+    /** Customize day separator style (color & thickness). */
+    public void setDaySeparatorStyle(Color color, float strokeWidth) {
+        if (color != null) this.daySeparatorColor = color;
+        if (strokeWidth > 0) this.daySeparatorStroke = strokeWidth;
+    }
+
+    /** Customize day separator font. */
+    public void setDaySeparatorFont(Font font) {
+        if (font != null) this.daySeparatorFont = font;
     }
 
     // ===== “Nice” axis helper =====

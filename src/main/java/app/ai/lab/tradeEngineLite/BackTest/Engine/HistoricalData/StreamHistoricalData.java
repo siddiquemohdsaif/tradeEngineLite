@@ -45,6 +45,10 @@ public class StreamHistoricalData {
     private static final Pattern ZIP_DATE_TAIL = Pattern.compile("_(\\d{2}-\\d{2}-\\d{2})\\.zip$",
             Pattern.CASE_INSENSITIVE);
 
+
+    private static final int  MAX_ZERODHA_DAYS_PER_CALL = 60;     // inclusive window (e.g., 60 = from..to spans 60 days)
+    private static final long CHUNK_THROTTLE_MS          = 10_000; // 10 seconds between chunks
+
     // STRICT: timestamp_<digits>.bin (case-insensitive)
     private static final Pattern STRICT_TS = Pattern.compile("timestamp_(\\d+)\\.bin", Pattern.CASE_INSENSITIVE);
 
@@ -133,6 +137,118 @@ public class StreamHistoricalData {
             callback.onEnd();
         } catch (Exception ignore) {
         }
+    }
+
+    /**
+     * Stream Zerodha historical candles as synthetic ticks (O, L, H, C),
+     * producing 4 Blocks per candle in that order, chunked into <=60-day ranges.
+     *
+     * @param enctoken Zerodha session enctoken (without the "enctoken " prefix)
+     * @param instrumentId Zerodha instrument token (index token or stock token)
+     * @param timeFrameMinutes 1, 3, 5, 15, etc.
+     * @param isIndex true -> emit IndexPacket; false -> emit StockPacket
+     */
+    public void stream_zerodha(String enctoken, int instrumentId, int timeFrameMinutes, boolean isIndex) {
+        final HistoricalCandleFetcherZerodha api = new HistoricalCandleFetcherZerodha(enctoken);
+    
+        // Walk the overall [startDate, endDate] range in inclusive 60-day chunks.
+        java.time.LocalDate cursor = startDate;
+        try {
+            while (!cursor.isAfter(endDate)) {
+                // Inclusive chunk end; cap at endDate.
+                java.time.LocalDate chunkEnd = cursor.plusDays(MAX_ZERODHA_DAYS_PER_CALL - 1);
+                if (chunkEnd.isAfter(endDate)) chunkEnd = endDate;
+            
+                final String from = cursor.toString();    // yyyy-MM-dd
+                final String to   = chunkEnd.toString();  // yyyy-MM-dd
+            
+                try {
+                    final java.util.List<HistoricalCandleFetcherZerodha.Candle> candles =
+                            api.fetchCandles(instrumentId, timeFrameMinutes, from, to);
+                
+                    // Emit in chronological order (chunk order + candle order).
+                    for (HistoricalCandleFetcherZerodha.Candle c : candles) {
+                        final long baseMs    = parseZerodhaTsToEpochMs(c.timestamp);
+                        final long epochSec  = baseMs / 1000L;
+                        final double[] ticks = new double[] { c.open, c.low, c.high, c.close };
+                    
+                        for (int i = 0; i < ticks.length; i++) {
+                            final long priceU32 = toU32Price(ticks[i]);
+                        
+                            Block.PacketData pd;
+                            if (isIndex) {
+                                Block.IndexPacket ip = new Block.IndexPacket();
+                                ip.setToken(instrumentId);
+                                ip.setLastTradedPrice(priceU32);
+                                ip.setExchangeTimestamp(epochSec);
+                                pd = ip;
+                            } else {
+                                Block.StockPacket sp = new Block.StockPacket();
+                                sp.setInstrumentToken(instrumentId);
+                                sp.setLastTradedPrice(priceU32);
+                                sp.setExchangeTimestamp(epochSec);
+                                sp.setVolumeTraded(c.volume);
+                                sp.setOpenInterest(c.oi);
+                                sp.setMarketDepth(java.util.Collections.emptyList());
+                                pd = sp;
+                            }
+                        
+                            Block block = new Block(baseMs + i, java.util.Collections.singletonList(pd));
+                            boolean keep = callback.onBlock(block);
+                            if (!keep) {
+                                try { callback.onEnd(); } catch (Exception ignore) {}
+                                return;
+                            }
+                        
+                            if (delayMs >= 0) {
+                                try {
+                                    Thread.sleep(delayMs);
+                                } catch (InterruptedException ie) {
+                                    Thread.currentThread().interrupt();
+                                    try { callback.onEnd(); } catch (Exception ignore) {}
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    // Non-fatal: report and continue to next chunk.
+                    callback.onError(e, rootDir);
+                }
+            
+                // Pause 10s between chunks (but not after the final one).
+                if (chunkEnd.isBefore(endDate)) {
+                    try {
+                        Thread.sleep(CHUNK_THROTTLE_MS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        try { callback.onEnd(); } catch (Exception ignore) {}
+                        return;
+                    }
+                }
+            
+                // Next chunk starts the day after this chunk's end (no overlap, no gaps).
+                cursor = chunkEnd.plusDays(1);
+            }
+        } finally {
+            try { callback.onEnd(); } catch (Exception ignore) {}
+        }
+    }
+    
+    // ---- helpers (keep inside StreamHistoricalData) ----
+    
+    // Zerodha timestamps look like "2025-09-05T09:15:00+0530" (offset without colon).
+    private static long parseZerodhaTsToEpochMs(String ts) {
+        java.time.format.DateTimeFormatter F =
+                java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssZ");
+        return java.time.ZonedDateTime.parse(ts, F).toInstant().toEpochMilli();
+    }
+    
+    // Use paise as the wire unit by default (×100). Adjust if your payload expects a different scale.
+    private static final int PRICE_SCALE = 100;
+    private static long toU32Price(double price) {
+        long scaled = Math.round(price * PRICE_SCALE);
+        return (scaled < 0) ? 0 : scaled; // clamp negative just in case
     }
 
 
