@@ -4,8 +4,11 @@ import app.ai.lab.tradeEngineLite.BackTest.Engine.HistoricalData.Block;
 import app.ai.lab.tradeEngineLite.BackTest.Exchange.OrderManagementService;
 import app.ai.lab.tradeEngineLite.BackTest.Exchange.VirtualExchange;
 import app.ai.lab.tradeEngineLite.GraphUtils.CandleGraphTracker;
+import app.ai.lab.tradeEngineLite.GraphUtils.CandleGraphTracker.MAType;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.awt.Color;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -53,8 +56,23 @@ public class Logicore {
         this.instrumentId = instrumentId;
         this.name = name;
         this.oms = oms;
-        this.tracker = new CandleGraphTracker(instrumentId, name, 86400);
+        int[] maPeriods = new int[]{200, 50, 20, 10, 5, 3};
+        MAType maType = MAType.EXPONENTIAL;
+        this.tracker = new CandleGraphTracker(instrumentId, name, 86400, maPeriods, maType);
         this.tracker.enableRSI(rsiPeriod);
+        Color[] MA_PALETTE = new Color[] {
+            new Color(238,101,46,255), // orangish
+            new Color(0, 165, 83),   // greenish
+            new Color(255, 0, 0),    // red
+            new Color(233, 8, 140),  // magenta
+            new Color(0, 175, 237),  // cyan
+            new Color(50, 50, 50),   // dark gray
+            new Color(128, 0, 128),  // purple
+            new Color(255, 165, 0),  // orange
+            new Color(0, 128, 255)   // azure
+        };
+        this.tracker.modifyMaPalette(MA_PALETTE);
+
     }
 
     /**

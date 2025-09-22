@@ -23,9 +23,14 @@ import javax.imageio.ImageIO;
  *    * Y-axis uses “nice” round ticks (1–2–5 × 10^k) and adds N minor lines between majors (default 9).
  *    * X-axis draws vertical grid lines at each labeled tick (or a custom every-k-candles cadence).
  * - Optional RSI:
- *    * Enable via constructor overload with rsiPeriod.
+ *    * Enable via constructor overloading with rsiPeriod.
  *    * RSI computed from candle CLOSES, appended when a new candle starts (i.e., previous candle closes).
  *    * If enabled, renders an RSI panel below the candles, sharing the same timeline.
+ *
+ * - Moving Averages (NEW):
+ *    * Configurable periods and type (SIMPLE/EXPONENTIAL).
+ *    * Defaults to SIMPLE on [60, 30, 20, 5, 3].
+ *    * Waves are computed on the two LARGEST configured MA periods.
  */
 public class CandleGraphTracker {
 
@@ -61,7 +66,7 @@ public class CandleGraphTracker {
     public static final class Wave {
         public WaveType waveType;
         public long timestamp;          // peak value bar time (ms)
-        public double price;            // peak value bar price (MA value)
+        public double price;            // peak value of MA at that bar
         public long recordTimestamp;    // ms
 
         public Wave(WaveType waveType, long timestamp, double price, long recordTimestamp) {
@@ -97,14 +102,15 @@ public class CandleGraphTracker {
         public double vix;
         public double totalLength;
         public double completePercent;
-        public double mavg60, mavg30, mavg10, mavg5, mavg3;
         public double volatility;       // per-tick candle volatility (body + 0.5*vix)
         public double volatilityIndex;  // avg of last N candle.volatility
         public BollingerBands bollinger = new BollingerBands(0, 0, 0);
 
+        /** Moving-average values aligned to the tracker's maPeriods order. */
+        public double[] maValues;
+
         public Candle(int tickCount, long timestamp, String candleId, double price,
-                      double completePercent, double m60, double m30, double m10, double m5, double m3,
-                      double volatilityIndex) {
+                      double completePercent, double volatilityIndex, double[] maSeed) {
             this.tickCount = tickCount;
             this.timestamp = timestamp;
             this.candleId = candleId;
@@ -116,13 +122,9 @@ public class CandleGraphTracker {
             this.vix = 0.0;
             this.totalLength = 0.0;
             this.completePercent = completePercent;
-            this.mavg60 = m60;
-            this.mavg30 = m30;
-            this.mavg10 = m10;
-            this.mavg5 = m5;
-            this.mavg3 = m3;
             this.volatility = 0.0;
             this.volatilityIndex = volatilityIndex;
+            this.maValues = (maSeed == null) ? null : Arrays.copyOf(maSeed, maSeed.length);
         }
     }
 
@@ -133,8 +135,15 @@ public class CandleGraphTracker {
     public long candleTimeFrameMs = 900_000; // 15m default
     public final List<Candle> candles = new ArrayList<>();
     public final List<MarketPoint> marketGraph = new ArrayList<>();
-    public final List<Wave> waves30 = new ArrayList<>();
-    public final List<Wave> waves60 = new ArrayList<>();
+
+    // === MA config (NEW) ===
+    public enum MAType { SIMPLE, EXPONENTIAL }
+    private int[] maPeriods = new int[]{60, 30, 10, 5, 3};
+    private MAType maType = MAType.SIMPLE;
+
+    // indices of the two LARGEST MA periods within maPeriods[] (for waves)
+    private int wavePrimaryIdx = 0;
+    private int waveSecondaryIdx = 1;
 
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final DateTimeFormatter ID_FMT = DateTimeFormatter.ofPattern("hh:mma").withLocale(Locale.ENGLISH);
@@ -180,9 +189,26 @@ public class CandleGraphTracker {
     private Color rsiLevelColor = new Color(200, 200, 200);  // 30/70 guides
     private float rsiLineStroke = 2.0f;
 
+    // Waves (NEW): primary & secondary MA
+    private final List<Wave> wavesPrimary = new ArrayList<>();
+    private final List<Wave> wavesSecondary = new ArrayList<>();
+
+    // Palette for MAs (cycled if more than 8)
+    private Color[] MA_PALETTE = new Color[] {
+            new Color(0, 165, 83),   // greenish
+            new Color(255, 0, 0),    // red
+            new Color(233, 8, 140),  // magenta
+            new Color(0, 175, 237),  // cyan
+            new Color(50, 50, 50),   // dark gray
+            new Color(128, 0, 128),  // purple
+            new Color(255, 165, 0),  // orange
+            new Color(0, 128, 255)   // azure
+    };
+
     public CandleGraphTracker(int id, String tradingsymbol) {
         this.id = id;
         this.tradingsymbol = tradingsymbol;
+        recomputeWaveIndices();
     }
 
     public CandleGraphTracker(int id, String tradingsymbol, long candleTimeFrameSeconds) {
@@ -190,19 +216,40 @@ public class CandleGraphTracker {
         this.candleTimeFrameMs = candleTimeFrameSeconds * 1000L;
     }
 
-    /** Enable RSI via constructor overloading. */
-    public CandleGraphTracker(int id, String tradingsymbol, long candleTimeFrameSeconds, int rsiPeriod) {
+    /** NEW: MA config + RSI constructor. */
+    public CandleGraphTracker(int id, String tradingsymbol, long candleTimeFrameSeconds,
+                              int[] maPeriods, MAType maType) {
         this(id, tradingsymbol, candleTimeFrameSeconds);
-        enableRSI(rsiPeriod);
+        setMovingAverageConfig(maPeriods, maType);
     }
 
     // ===== Public API =====
+
+    /** Configure moving averages (applies to future computations). Prefer calling before adding data. */
+    public void setMovingAverageConfig(int[] periods, MAType type) {
+        if (periods == null || periods.length == 0) {
+            throw new IllegalArgumentException("maPeriods must have at least 1 period");
+        }
+        for (int p : periods) if (p <= 0) throw new IllegalArgumentException("MA period must be > 0");
+        this.maPeriods = Arrays.copyOf(periods, periods.length);
+        this.maType = (type == null) ? MAType.SIMPLE : type;
+        recomputeWaveIndices();
+
+        // If candles already exist, re-seed current candle's maValues dimension if needed
+        for (Candle c : candles) {
+            if (c.maValues == null || c.maValues.length != maPeriods.length) {
+                double[] seed = new double[maPeriods.length];
+                Arrays.fill(seed, c.close); // neutral seed; subsequent ticks will refine
+                c.maValues = seed;
+            }
+        }
+    }
 
     /** Add a market tick (ms since epoch, price). */
     public void addMarketData(long timeMs, double price) {
         marketGraph.add(new MarketPoint(timeMs, price));
         updateCandles(timeMs, price);
-        updateWaves(); // includes Bollinger updates
+        updateWavesAndBands(); // includes Bollinger updates
     }
 
     public Double getRSILatest(){
@@ -226,7 +273,7 @@ public class CandleGraphTracker {
         final int width = 2560 * 8;   // 20480
         final int height = 1440 * 2;  // 2880
 
-        boolean hasRSIToDraw = rsiEnabled; // draw panel regardless of whether latest points are null; timeline still shared
+        boolean hasRSIToDraw = rsiEnabled; // draw panel regardless; timeline still shared
 
         BufferedImage img = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = img.createGraphics();
@@ -342,7 +389,7 @@ public class CandleGraphTracker {
             }
             g.setStroke(oldStroke);
 
-            // ---- Day separators (NEW): draw at the first candle of each day and label "dd-MM-yy"
+            // ---- Day separators (NEW)
             List<Integer> dayStarts = new ArrayList<>();
             LocalDate lastDate = null;
             for (int i = 0; i < n; i++) {
@@ -354,7 +401,7 @@ public class CandleGraphTracker {
                 }
             }
 
-            if (dayStarts.size() >= 2) { // only useful if we have multiple days
+            if (dayStarts.size() >= 2) {
                 Stroke prevStroke = g.getStroke();
                 Font prevFont = g.getFont();
                 g.setStroke(new BasicStroke(daySeparatorStroke));
@@ -363,11 +410,7 @@ public class CandleGraphTracker {
 
                 for (int idx : dayStarts) {
                     double x = xToPixel(idx + 0.5, n, plotX, plotW);
-
-                    // Vertical day line across candle + RSI panels (if present)
                     g.drawLine((int) x, gridTop, (int) x, gridBottom);
-
-                    // Date label, centered beneath the existing x-axis labels
                     String dayLabel = DAY_FMT.format(Instant.ofEpochMilli(candles.get(idx).timestamp).atZone(IST));
                     int labelY = (hasRSIToDraw ? (rsiY + rsiH + 28) : (plotY + plotH + 28)) + 22;
                     g.setColor(Color.DARK_GRAY);
@@ -391,7 +434,6 @@ public class CandleGraphTracker {
                     drawCentered(g, label, (int) x, labelBaseY);
                 }
             }
-
 
             // ---- Candles (wicks + body)
             Color green = new Color(76, 175, 80);
@@ -421,58 +463,59 @@ public class CandleGraphTracker {
                 g.fillRect(xLeft, yTop, bodyW, hBody);
             }
 
-            // ---- Moving averages
-            Color m60 = new Color(0, 165, 83);
-            Color m30 = new Color(255, 0, 0);
-            Color m10 = new Color(233, 8, 140);
-            Color m5  = new Color(0, 175, 237);
-            Color m3  = new Color(50, 50, 50);
-
-            drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, yMinPlot, yMaxPlot, c -> c.mavg3,  2f, m3);
-            drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, yMinPlot, yMaxPlot, c -> c.mavg5,  2f, m5);
-            drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, yMinPlot, yMaxPlot, c -> c.mavg10, 2f, m10);
-            drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, yMinPlot, yMaxPlot, c -> c.mavg60, 2f, m60);
-            drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, yMinPlot, yMaxPlot, c -> c.mavg30, 2f, m30);
-
-            // ---- Waves (30)
-            g.setColor(m30);
-            for (Wave w : waves30) {
-                int idx = indexOfTimestamp(candles, w.timestamp);
-                if (idx >= 0) {
-                    double cx = idx + 0.5;
-                    int x = (int) xToPixel(cx, n, plotX, plotW);
-                    int y = yToPixel(w.price, yMinPlot, yMaxPlot, plotY, plotH);
-                    fillCircle(g, x, y, 6);
-                }
-                int recIdx = indexOfTimestamp(candles, w.recordTimestamp);
-                if (recIdx >= 0) {
-                    double cx = recIdx + 0.5;
-                    int x = (int) xToPixel(cx, n, plotX, plotW);
-                    int y = yToPixel(candles.get(recIdx).mavg30, yMinPlot, yMaxPlot, plotY, plotH);
-                    g.setColor(Color.BLACK);
-                    fillCircle(g, x, y, 6);
-                    g.setColor(m30);
-                }
+            // ---- Moving averages (dynamic)
+            for (int mi = 0; mi < maPeriods.length; mi++) {
+                final int idx = mi;
+                Color color = MA_PALETTE[mi % MA_PALETTE.length];
+                drawLineSeries(g, candles, n, plotX, plotW, plotY, plotH, yMinPlot, yMaxPlot,
+                        c -> (c.maValues != null && idx < c.maValues.length) ? c.maValues[idx] : Double.NaN,
+                        2f, color);
             }
 
-            // ---- Waves (60)
-            g.setColor(m60);
-            for (Wave w : waves60) {
-                int idx = indexOfTimestamp(candles, w.timestamp);
-                if (idx >= 0) {
-                    double cx = idx + 0.5;
-                    int x = (int) xToPixel(cx, n, plotX, plotW);
-                    int y = yToPixel(w.price, yMinPlot, yMaxPlot, plotY, plotH);
-                    fillCircle(g, x, y, 6);
+            // ---- Waves (primary & secondary on two largest periods)
+            // Primary
+            if (maPeriods.length >= 2) {
+                Color waveColorP = MA_PALETTE[wavePrimaryIdx % MA_PALETTE.length];
+                g.setColor(waveColorP);
+                for (Wave w : wavesPrimary) {
+                    int idx = indexOfTimestamp(candles, w.timestamp);
+                    if (idx >= 0) {
+                        double cx = idx + 0.5;
+                        int x = (int) xToPixel(cx, n, plotX, plotW);
+                        int y = yToPixel(w.price, yMinPlot, yMaxPlot, plotY, plotH);
+                        fillCircle(g, x, y, 6);
+                    }
+                    int recIdx = indexOfTimestamp(candles, w.recordTimestamp);
+                    if (recIdx >= 0) {
+                        double cx = recIdx + 0.5;
+                        int x = (int) xToPixel(cx, n, plotX, plotW);
+                        int y = yToPixel(candles.get(recIdx).maValues[wavePrimaryIdx], yMinPlot, yMaxPlot, plotY, plotH);
+                        g.setColor(Color.BLACK);
+                        fillCircle(g, x, y, 6);
+                        g.setColor(waveColorP);
+                    }
                 }
-                int recIdx = indexOfTimestamp(candles, w.recordTimestamp);
-                if (recIdx >= 0) {
-                    double cx = recIdx + 0.5;
-                    int x = (int) xToPixel(cx, n, plotX, plotW);
-                    int y = yToPixel(candles.get(recIdx).mavg60, yMinPlot, yMaxPlot, plotY, plotH);
-                    g.setColor(Color.BLACK);
-                    fillCircle(g, x, y, 6);
-                    g.setColor(m60);
+
+                // Secondary
+                Color waveColorS = MA_PALETTE[waveSecondaryIdx % MA_PALETTE.length];
+                g.setColor(waveColorS);
+                for (Wave w : wavesSecondary) {
+                    int idx = indexOfTimestamp(candles, w.timestamp);
+                    if (idx >= 0) {
+                        double cx = idx + 0.5;
+                        int x = (int) xToPixel(cx, n, plotX, plotW);
+                        int y = yToPixel(w.price, yMinPlot, yMaxPlot, plotY, plotH);
+                        fillCircle(g, x, y, 6);
+                    }
+                    int recIdx = indexOfTimestamp(candles, w.recordTimestamp);
+                    if (recIdx >= 0) {
+                        double cx = recIdx + 0.5;
+                        int x = (int) xToPixel(cx, n, plotX, plotW);
+                        int y = yToPixel(candles.get(recIdx).maValues[waveSecondaryIdx], yMinPlot, yMaxPlot, plotY, plotH);
+                        g.setColor(Color.BLACK);
+                        fillCircle(g, x, y, 6);
+                        g.setColor(waveColorS);
+                    }
                 }
             }
 
@@ -518,11 +561,12 @@ public class CandleGraphTracker {
             // ---- Legend (top-left of candle panel)
             int lx = plotX + 20;
             int ly = plotY + 20;
-            drawLegendEntry(g, lx, ly, m3,  "MA3");   ly += 28;
-            drawLegendEntry(g, lx, ly, m5,  "MA5");   ly += 28;
-            drawLegendEntry(g, lx, ly, m10, "MA10");  ly += 28;
-            drawLegendEntry(g, lx, ly, m30, "MA30");  ly += 28;
-            drawLegendEntry(g, lx, ly, m60, "MA60");  ly += 28;
+            for (int mi = 0; mi < maPeriods.length; mi++) {
+                Color color = MA_PALETTE[mi % MA_PALETTE.length];
+                String label = (maType == MAType.EXPONENTIAL ? "EMA" : "SMA") + maPeriods[mi];
+                drawLegendEntry(g, lx, ly, color, label);
+                ly += 28;
+            }
             drawLegendEntry(g, lx, ly, Color.BLACK, "BB (M/U/L)"); ly += 28;
 
             // ================= RSI PANEL =================
@@ -549,17 +593,16 @@ public class CandleGraphTracker {
                     }
                     g.drawLine(plotX, yLine, plotX + plotW, yLine);
 
-                    // label the majors (every 10%) to avoid clutter
                     if (isMajor) {
                         g.setColor(Color.DARK_GRAY);
                         g.setFont(g.getFont().deriveFont(Font.PLAIN, 16f));
                         String lbl = String.valueOf(v);
-                        g.drawString(lbl, 10, yLine + 5); // left margin labels
+                        g.drawString(lbl, 10, yLine + 5);
                     }
                 }
                 g.setStroke(oldStroke2);
 
-                // Emphasize the classic 30/70 levels over the grid (optional & corrected)
+                // 0 and 100 bold
                 int rsi0y = rsiToPixel(0, rsiY, rsiH);
                 int rsi100y = rsiToPixel(100, rsiY, rsiH);
                 oldStroke = g.getStroke();
@@ -598,7 +641,7 @@ public class CandleGraphTracker {
         om.writeValue(new File(filePath), out);
     }
 
-    // ===== Core logic (ported) =====
+    // ===== Core logic =====
 
     private void updateCandles(long timeMs, double price) {
         long frame = candleTimeFrameMs;
@@ -627,10 +670,7 @@ public class CandleGraphTracker {
                 last.volatility = body + 0.5 * last.vix;
             } else {
                 // New candle is starting => previous candle just CLOSED.
-                // If RSI enabled, compute RSI on the previous candle CLOSE and align to its index.
                 if (rsiEnabled) maybeAddRsiOnCandleClose();
-
-                // New candle
                 createNewCandle(candleTs, candleId, price, completePercent);
             }
         } else {
@@ -638,25 +678,10 @@ public class CandleGraphTracker {
             createNewCandle(candleTs, candleId, price, completePercent);
         }
 
-        // Compute moving averages for the last candle
-        int lastIdx = candles.size() - 1;
-        int[] periods = {60, 30, 10, 5, 3};
-        for (int p : periods) {
-            int n = Math.min(p, candles.size());
-            double sum = 0.0;
-            for (int i = candles.size() - n; i < candles.size(); i++) {
-                sum += candles.get(i).close;
-            }
-            double avg = sum / n;
-            Candle cur = candles.get(lastIdx);
-            switch (p) {
-                case 60 -> cur.mavg60 = avg;
-                case 30 -> cur.mavg30 = avg;
-                case 10 -> cur.mavg10 = avg;
-                case 5  -> cur.mavg5 = avg;
-                case 3  -> cur.mavg3 = avg;
-            }
-        }
+        // Compute moving averages for the last candle (dynamic)
+        computeMAForLastCandle();
+
+        // Volatility index for new last candle already set on creation; nothing else to do here
     }
 
     private void createNewCandle(long candleTs, String candleId, double price, double completePercent) {
@@ -672,48 +697,86 @@ public class CandleGraphTracker {
             volIndex = sum / n;
         }
 
-        if (!candles.isEmpty()) {
-            Candle last = candles.get(candles.size() - 1);
-            candles.add(new Candle(
-                    1, candleTs, candleId, price, completePercent,
-                    last.mavg60, last.mavg30, last.mavg10, last.mavg5, last.mavg3,
-                    volIndex
-            ));
+        // Seed MA array for the new candle: carry forward previous values if available; else fill with price.
+        double[] seed;
+        if (!candles.isEmpty() && candles.get(count - 1).maValues != null
+                && candles.get(count - 1).maValues.length == maPeriods.length) {
+            seed = Arrays.copyOf(candles.get(count - 1).maValues, maPeriods.length);
         } else {
-            candles.add(new Candle(
-                    1, candleTs, candleId, price, completePercent,
-                    price, price, price, price, price,
-                    0.0
-            ));
+            seed = new double[maPeriods.length];
+            Arrays.fill(seed, price);
         }
 
-        // Ensure RSI vector stays aligned: append a placeholder for the NEW (open) candle.
+        candles.add(new Candle(1, candleTs, candleId, price, completePercent, volIndex, seed));
+
+        // Ensure RSI vector stays aligned with candles (add placeholder for the NEW candle).
         if (rsiEnabled) {
-            // We only compute RSI for closed candles. The newly opened candle has no RSI yet.
-            // So keep rsiValues size == candles size by adding a null placeholder for this candle.
             while (rsiValues.size() < candles.size()) {
                 rsiValues.add(null);
             }
         }
     }
 
-    private void updateWaves() {
-        if (candles.size() < 5) return;
-        evaluateWave(30, waves30);
-        evaluateWave(60, waves60);
+    private void updateWavesAndBands() {
+        if (candles.size() < 5) { updateBollingerBands(20, 2.0); return; }
+
+        // Evaluate waves on two largest MAs if we have at least two
+        if (maPeriods.length >= 2) {
+            evaluateWaveForMA(wavePrimaryIdx, wavesPrimary);
+            evaluateWaveForMA(waveSecondaryIdx, wavesSecondary);
+        }
         updateBollingerBands(20, 2.0);
     }
 
-    private void evaluateWave(int mavgPeriod, List<Wave> waves) {
+    // Compute last candle's MA values according to current config.
+    private void computeMAForLastCandle() {
+        if (candles.isEmpty()) return;
+        int lastIdx = candles.size() - 1;
+        Candle cur = candles.get(lastIdx);
+        if (cur.maValues == null || cur.maValues.length != maPeriods.length) {
+            cur.maValues = new double[maPeriods.length];
+            Arrays.fill(cur.maValues, cur.close);
+        }
+
+        for (int i = 0; i < maPeriods.length; i++) {
+            int period = maPeriods[i];
+
+            if (maType == MAType.SIMPLE) {
+                int n = Math.min(period, candles.size());
+                double sum = 0.0;
+                for (int k = candles.size() - n; k < candles.size(); k++) sum += candles.get(k).close;
+                cur.maValues[i] = sum / n;
+            } else {
+                // EXPONENTIAL (EMA), Wilder-style seeding with SMA at the first full window.
+                double k = 2.0 / (period + 1.0);
+                if (lastIdx == 0) {
+                    cur.maValues[i] = cur.close; // seed at first candle
+                } else if (lastIdx < period - 1) {
+                    // not enough for a full window; use SMA of available closes
+                    int n = lastIdx + 1;
+                    double sum = 0.0;
+                    for (int kx = 0; kx <= lastIdx; kx++) sum += candles.get(kx).close;
+                    cur.maValues[i] = sum / n;
+                } else if (lastIdx == period - 1) {
+                    // exactly first full window -> SMA
+                    double sum = 0.0;
+                    for (int kx = 0; kx < period; kx++) sum += candles.get(kx).close;
+                    cur.maValues[i] = sum / period;
+                } else {
+                    double prevEma = candles.get(lastIdx - 1).maValues[i];
+                    cur.maValues[i] = (cur.close * k) + (prevEma * (1.0 - k));
+                }
+            }
+        }
+    }
+
+    private void evaluateWaveForMA(int maIdx, List<Wave> waves) {
         int last = candles.size() - 1;
 
-        // slope over last 5
-        double slope;
-        if (mavgPeriod == 30) {
-            slope = (candles.get(last).mavg30 - candles.get(last - 4).mavg30) / 5.0;
-        } else {
-            slope = (candles.get(last).mavg60 - candles.get(last - 4).mavg60) / 5.0;
-        }
+        // slope over last 5 of this MA
+        double vLast = candles.get(last).maValues[maIdx];
+        double vPrev5 = candles.get(last - 4).maValues[maIdx];
+        double slope = (vLast - vPrev5) / 5.0;
 
         // Don't add if last wave < 5 minutes ago
         if (!waves.isEmpty()) {
@@ -726,20 +789,20 @@ public class CandleGraphTracker {
 
         if (waves.isEmpty()) {
             if (slope > 0.1) {
-                // min of last 5 MAs -> Trough
+                // min of last 5 MA -> Trough
                 double bestPrice = Double.POSITIVE_INFINITY;
                 long bestTs = 0L;
                 for (int i = last - 4; i <= last; i++) {
-                    double v = (mavgPeriod == 30) ? candles.get(i).mavg30 : candles.get(i).mavg60;
+                    double v = candles.get(i).maValues[maIdx];
                     if (v < bestPrice) { bestPrice = v; bestTs = candles.get(i).timestamp; }
                 }
                 waves.add(new Wave(WaveType.Trough, bestTs, bestPrice, candles.get(last).timestamp));
             } else if (slope < -0.1) {
-                // max of last 5 MAs -> Crest
+                // max of last 5 MA -> Crest
                 double bestPrice = Double.NEGATIVE_INFINITY;
                 long bestTs = 0L;
                 for (int i = last - 4; i <= last; i++) {
-                    double v = (mavgPeriod == 30) ? candles.get(i).mavg30 : candles.get(i).mavg60;
+                    double v = candles.get(i).maValues[maIdx];
                     if (v > bestPrice) { bestPrice = v; bestTs = candles.get(i).timestamp; }
                 }
                 waves.add(new Wave(WaveType.Crest, bestTs, bestPrice, candles.get(last).timestamp));
@@ -751,7 +814,7 @@ public class CandleGraphTracker {
                 double bestPrice = Double.POSITIVE_INFINITY;
                 long bestTs = 0L;
                 for (int i = last - 4; i <= last; i++) {
-                    double v = (mavgPeriod == 30) ? candles.get(i).mavg30 : candles.get(i).mavg60;
+                    double v = candles.get(i).maValues[maIdx];
                     if (v < bestPrice) { bestPrice = v; bestTs = candles.get(i).timestamp; }
                 }
                 waves.add(new Wave(WaveType.Trough, bestTs, bestPrice, candles.get(last).timestamp));
@@ -760,7 +823,7 @@ public class CandleGraphTracker {
                 double bestPrice = Double.NEGATIVE_INFINITY;
                 long bestTs = 0L;
                 for (int i = last - 4; i <= last; i++) {
-                    double v = (mavgPeriod == 30) ? candles.get(i).mavg30 : candles.get(i).mavg60;
+                    double v = candles.get(i).maValues[maIdx];
                     if (v > bestPrice) { bestPrice = v; bestTs = candles.get(i).timestamp; }
                 }
                 waves.add(new Wave(WaveType.Crest, bestTs, bestPrice, candles.get(last).timestamp));
@@ -800,7 +863,6 @@ public class CandleGraphTracker {
     public void enableRSI(int period) {
         this.rsiEnabled = true;
         this.rsiPeriod = Math.max(2, period);
-        // keep existing state if re-enabled; call resetRSI() first if needed
     }
 
     /** Optional: clear RSI state if you want to restart computation. */
@@ -811,8 +873,12 @@ public class CandleGraphTracker {
         rsiInitCount = 0;
         rsiInitialized = false;
         rsiValues.clear();
-        // Pre-fill to current candles size with nulls to keep alignment
         for (int i = 0; i < candles.size(); i++) rsiValues.add(null);
+    }
+
+    // ===== MA_PALETTE helpers =====
+    public void modifyMaPalette(Color[] maPalette ) {
+        this.MA_PALETTE = maPalette;
     }
 
     /** Called exactly when a new candle starts -> previous candle is closed. */
@@ -822,7 +888,6 @@ public class CandleGraphTracker {
         Candle prev = candles.get(candles.size() - 1);
         double close = prev.close;
 
-        // First close initializes prevClose and produces a null RSI (no diff yet)
         if (rsiPrevClose == null) {
             rsiPrevClose = close;
             ensureRsiAlignmentForClosedIndex(candles.size() - 1, null);
@@ -834,7 +899,6 @@ public class CandleGraphTracker {
         double loss = Math.max(-change, 0.0);
 
         if (!rsiInitialized) {
-            // Accumulate initial period-1 diffs; on reaching period, emit first RSI
             rsiAvgGain += gain;
             rsiAvgLoss += loss;
             rsiInitCount += 1;
@@ -865,16 +929,13 @@ public class CandleGraphTracker {
         return 100.0 - (100.0 / (1.0 + rs));
     }
 
-    /** Ensure rsiValues[iClosed] is set, expanding/null-filling as needed to align with candles. */
     private void ensureRsiAlignmentForClosedIndex(int closedIndex, Double value) {
         while (rsiValues.size() < candles.size()) rsiValues.add(null);
-        // closedIndex should be within bounds (last candle before new one was appended)
         if (closedIndex >= 0 && closedIndex < rsiValues.size()) {
             rsiValues.set(closedIndex, value);
         }
     }
 
-    /** Build a series length=n (candles) with RSI values/nulls aligned to indices. */
     private List<Double> rsiAlignedToCandles(int n) {
         if (!rsiEnabled) return Collections.nCopies(n, null);
         List<Double> out = new ArrayList<>(n);
@@ -913,7 +974,6 @@ public class CandleGraphTracker {
     }
 
     private static int rsiToPixel(double value, int plotY, int plotH) {
-        // RSI is 0..100
         double norm = value / 100.0;
         return plotY + (int) Math.round(plotH - norm * plotH);
     }
@@ -956,7 +1016,7 @@ public class CandleGraphTracker {
         boolean started = false;
         for (int i = 0; i < series.size(); i++) {
             Double v = series.get(i);
-            if (v == null) continue;
+            if (v == null || Double.isNaN(v)) continue;
             double x = xToPixel(i + 0.5, n, plotX, plotW);
             int y = (maxVal == minVal)
                     ? plotY + plotH / 2
@@ -974,7 +1034,6 @@ public class CandleGraphTracker {
             boolean ok = ImageIO.write(img, ext, file);
             if (ok) return true;
         } catch (Exception ignore) { }
-        // fallback to PNG
         try {
             File png = file.getName().toLowerCase(Locale.ENGLISH).endsWith(".png")
                     ? file
@@ -1054,7 +1113,6 @@ public class CandleGraphTracker {
 
     // ===== “Nice” axis helper =====
 
-    // Produces round min/max and tick spacing like 60,70,80 or 100,120,140...
     private static final class NiceScale {
         final double niceMin, niceMax, tickSpacing;
         final int ticks;
@@ -1098,10 +1156,31 @@ public class CandleGraphTracker {
         return String.format(Locale.ENGLISH, "%." + decimals + "f", value);
     }
 
+    // ===== Internal helpers =====
+
+    private void recomputeWaveIndices() {
+        // pick two largest periods by value
+        if (maPeriods.length == 1) {
+            wavePrimaryIdx = 0;
+            waveSecondaryIdx = 0;
+            return;
+        }
+        // build index list sorted by period desc
+        Integer[] idxs = new Integer[maPeriods.length];
+        for (int i = 0; i < maPeriods.length; i++) idxs[i] = i;
+        Arrays.sort(idxs, (a, b) -> Integer.compare(maPeriods[b], maPeriods[a]));
+        wavePrimaryIdx = idxs[0];
+        waveSecondaryIdx = idxs[1];
+    }
+
     // ===== Example Spring Boot wiring =====
     // @Service
     // public static class CandleService {
+    //     // default SIMPLE [60,30,20,5,3] & RSI 14
     //     private final CandleGraphTracker tracker = new CandleGraphTracker(1, "NIFTY", 60L, 14);
+    //     // or:
+    //     // private final CandleGraphTracker tracker = new CandleGraphTracker(1, "NIFTY", 60L,
+    //     //         new int[]{200,50,20,10,3}, MAType.EXPONENTIAL, 14);
     //     public void onTick(long epochMs, double price) { tracker.addMarketData(epochMs, price); }
     //     public void render(String dir) throws IOException { tracker.drawCandleGraph(dir); }
     // }
