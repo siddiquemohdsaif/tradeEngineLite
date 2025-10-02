@@ -59,7 +59,7 @@ public class Logicore {
         int[] maPeriods = new int[]{200, 50, 20, 10, 5, 3};
         MAType maType = MAType.EXPONENTIAL;
         this.tracker = new CandleGraphTracker(instrumentId, name, 86400, maPeriods, maType);
-        this.tracker.enableRSI(rsiPeriod);
+        this.tracker.enableRSI(rsiPeriod, true);
         Color[] MA_PALETTE = new Color[] {
             new Color(238,101,46,255), // orangish
             new Color(0, 165, 83),   // greenish

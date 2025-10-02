@@ -53,7 +53,7 @@ public class LogicalCore {
     /** Enable/disable once-per-day status log. (Default true) */
     public volatile boolean dailyStatusLoggingEnabled = true;
 
-    // ===== Tunables =====
+    // ===== Tunables Config =====
     private static final int    LOOKBACK_EMA_TREND = 7;       // 7 closed candles
     private static final long   CANDLE_SECONDS     = 86_400;  // daily candles
     private static final double ENTRY_BAND         = 0.001;   // 0.1% below prev EMA20
@@ -380,8 +380,18 @@ public class LogicalCore {
             Path dir = Path.of("D:", "SpringBoot project", "Trade", "output files",
                     "tradeInfo", "EMA20_v1");
             Files.createDirectories(dir);
-            String stamp = (Objects.equals(type, "ENTRY") ? String.valueOf(entryTime) : String.valueOf(System.currentTimeMillis()));
-            String fileName = type.toLowerCase(Locale.ENGLISH) + "_" + stamp + "_" + name + ".json";
+            long timestamp = Objects.equals(type, "ENTRY") ? entryTime : (long) extra.get("exitTime");
+            String dateStr = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")
+                    .withZone(java.time.ZoneId.of("Asia/Kolkata"))
+                    .format(java.time.Instant.ofEpochMilli(timestamp));
+            String fileName = timestamp + "_" + type.toLowerCase(Locale.ENGLISH) + "_" + dateStr + "_" + name ;
+
+            if (type.equals("EXIT")) {
+                fileName = fileName + "_" + extra.get("pnl") + ".json";
+            }else{
+                fileName = fileName + ".json";
+            }
+
             Path file = dir.resolve(fileName);
 
             Map<String, Object> info = new LinkedHashMap<>();
@@ -390,7 +400,7 @@ public class LogicalCore {
             info.put("symbol", name);
             info.put("inPosition", inPosition);
             info.put("entryTime", entryTime);
-            info.put("entryPrice", entryPrice);
+            info.put("entryrice", entryPrice);
             info.put("totalProfit", totalProfit);
             info.put("state", state.toString());
             info.put("stateNote", stateNote);

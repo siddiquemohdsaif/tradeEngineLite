@@ -134,7 +134,7 @@ class LogicoreNiftyBacktestTest {
         );
 
         //streamer.stream("09:15 am", "03:30 pm");
-        streamer.stream_zerodha("hqzF41ciowAM20O4R0nzh98pgYYWl07pk5Pc6vHoD5SaILGcfFXlgh7POqZOA6ZRshDxPDGz9f2vchjpI/26zDx3TE/4AkSjwLL/egySui2XnnvlymDDaQ==", token, 1, true);
+        streamer.stream_zerodha("fxPdaQgautTWwdVRoJJmWXVMsHs0EsUpLjMM1nwVeheRlvsgSwoBXpHFkiCb8lc4QcVEZQbbaN9Y/agv7rF0obKyn7NQZVXa54UY6FRjaRmit1Mi3sxNEg==", token, 1, true);
         logic.drawGraph(outDir.toString());
 
         assertTrue(Files.exists(outDir.resolve(token + "_" + name + ".json")));
