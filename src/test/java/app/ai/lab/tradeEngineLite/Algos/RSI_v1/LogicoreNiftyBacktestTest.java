@@ -134,7 +134,68 @@ class LogicoreNiftyBacktestTest {
         );
 
         //streamer.stream("09:15 am", "03:30 pm");
-        streamer.stream_zerodha("fxPdaQgautTWwdVRoJJmWXVMsHs0EsUpLjMM1nwVeheRlvsgSwoBXpHFkiCb8lc4QcVEZQbbaN9Y/agv7rF0obKyn7NQZVXa54UY6FRjaRmit1Mi3sxNEg==", token, 1, true);
+        streamer.stream_zerodha("MZLT4joHBvUsIZVb720PfKZENuD2hcu/buw4PlsxlspbWeBr6wXpZJvKjHZhUfAQzO2fJE4OsPokWYq1p1nhMs6FdBuykeTldqCrQOR0lcwfuLHl1eIIBg==", token, 1, true);
+        logic.drawGraph(outDir.toString());
+
+        assertTrue(Files.exists(outDir.resolve(token + "_" + name + ".json")));
+        assertTrue(Files.exists(outDir.resolve(token + "_" + name + ".png")));
+    }
+
+
+
+
+    
+    
+    @Test
+    void backtestNifty100_15M() throws IOException {
+        Path root = Path.of("D:\\Node Project\\Trading\\IntraDay record\\ticker_historic_data");
+        Assumptions.assumeTrue(Files.isDirectory(root), "Test data folder not found: " + root);
+
+        Path outDir = Path.of("D:", "SpringBoot project", "Trade", "output files");
+        Files.createDirectories(outDir);
+
+        final int token = 256265;
+        final String name = "NIFTY_100";
+
+        Files.deleteIfExists(outDir.resolve(token + "_" + name + ".json"));
+        Files.deleteIfExists(outDir.resolve(token + "_" + name + ".png"));
+
+        OrderManagementService oms = new OrderManagementService();
+        Logicore logic = new Logicore(token, name, oms);
+        AtomicInteger added = new AtomicInteger();
+
+        StreamHistoricalData streamer = new StreamHistoricalData(
+                root,
+                "01-08-25",
+                "03-10-25",
+                "NIFTY_100",
+                -1,
+                new StreamHistoricalData.BlockCallback() {
+                    @Override
+                    public boolean onBlock(Block block) {
+                        logic.onBlock(block);
+                        oms.onBlock(block);
+                        int i = added.incrementAndGet();
+                        if (i%100 == 0) {
+                            System.out.println("tick-count: " + i + " time : "+ new Date(block.getTimeStamp()));
+                        }
+                        return true;
+                    }
+
+                    @Override
+                    public void onError(Exception e, Path source) {
+                        System.err.println("Error: " + e + " at " + source);
+                    }
+
+                    @Override
+                    public void onEnd() {
+                        // no-op
+                    }
+                }
+        );
+
+        //streamer.stream("09:15 am", "03:30 pm");
+        streamer.stream_zerodha("MZLT4joHBvUsIZVb720PfKZENuD2hcu/buw4PlsxlspbWeBr6wXpZJvKjHZhUfAQzO2fJE4OsPokWYq1p1nhMs6FdBuykeTldqCrQOR0lcwfuLHl1eIIBg==", token, 1, true);
         logic.drawGraph(outDir.toString());
 
         assertTrue(Files.exists(outDir.resolve(token + "_" + name + ".json")));

@@ -2,18 +2,26 @@ package app.ai.lab.tradeEngineLite.GraphUtils;
 
 import java.awt.*;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 
+/**
+ * RSI + Divergence utilities aligned to the TradingView Pine script:
+ * - Pivots are computed on the RSI using (lbL, lbR) like ta.pivotlow/ta.pivothigh
+ * - Regular & Hidden divergences use the exact comparisons from the provided Pine script
+ * - Range filter equals distance (in bars) between consecutive RSI pivots (centers)
+ * - Four plot toggles to enable/disable sets
+ *
+ * Alerts are intentionally NOT implemented.
+ */
 public final class RsiUtils {
 
     private RsiUtils() {}
 
-    // =============== RSI COMPUTATION (Wilder) ===============
+    // ========================= Wilder RSI =========================
 
     public static final class RsiState {
-        private final List<Double> values = new ArrayList<>(); // one entry per CLOSED candle (may be null initially)
+        private final List<Double> values = new ArrayList<>(); // one per CLOSED candle (nullable until seeded)
         private int period;
         private Double prevClose = null;
         private double avgGain = 0.0;
@@ -21,9 +29,7 @@ public final class RsiUtils {
         private int initCount = 0;
         private boolean initialized = false;
 
-        public RsiState(int period) {
-            this.period = Math.max(2, period);
-        }
+        public RsiState(int period) { this.period = Math.max(2, period); }
 
         public void reset(int period) {
             this.period = Math.max(2, period);
@@ -35,7 +41,7 @@ public final class RsiUtils {
             initialized = false;
         }
 
-        /** Call EXACTLY once per CLOSED candle (i.e., when next candle begins). Returns RSI for the closed candle, or null until seeded. */
+        /** Call once per CLOSED candle. Returns RSI for the closed candle, or null until seeded. */
         public Double onClose(double close) {
             Double out;
             if (prevClose == null) {
@@ -80,189 +86,300 @@ public final class RsiUtils {
         }
     }
 
-    // =============== DIVERGENCE (REGULAR) ===================
+    // ========================= Divergence Core =========================
 
-    public enum DivergenceType { BEARISH_REGULAR, BULLISH_REGULAR }
+    public enum DivergenceType {
+        REGULAR_BULLISH,   // price LL, rsi HL
+        HIDDEN_BULLISH,    // price HL, rsi LL
+        REGULAR_BEARISH,   // price HH, rsi LH
+        HIDDEN_BEARISH     // price LH, rsi HH
+    }
 
     public static final class Pivot {
-        public final int index;
+        public final int index;   // center index of the pivot (i)
         public final double value;
         public Pivot(int i, double v) { index = i; value = v; }
     }
 
     public static final class Divergence {
         public final DivergenceType type;
-        public final int startIndex;   // older pivot index used
-        public final int endIndex;     // newer pivot index used
-        public final Pivot priceA, priceB; // price pivots
-        public final Pivot rsiA, rsiB;     // rsi pivots
+        public final int startIndex;     // older RSI pivot center
+        public final int endIndex;       // newer RSI pivot center
+        // values at RSI pivot centers:
+        public final double priceA, priceB;
+        public final double rsiA, rsiB;
 
-        public Divergence(DivergenceType type, Pivot priceA, Pivot priceB, Pivot rsiA, Pivot rsiB) {
+        public Divergence(DivergenceType type, int startIdx, int endIdx,
+                          double priceA, double priceB,
+                          double rsiA, double rsiB) {
             this.type = type;
+            this.startIndex = startIdx;
+            this.endIndex = endIdx;
             this.priceA = priceA;
             this.priceB = priceB;
             this.rsiA = rsiA;
             this.rsiB = rsiB;
-            this.startIndex = priceA.index;
-            this.endIndex = priceB.index;
         }
     }
 
-    private static final double EPS = 1e-9;
+    public static final class Config {
+        public int lbL = 5;
+        public int lbR = 1;
+        public int rangeLower = 5;
+        public int rangeUpper = 60;
 
-    /** Find local extrema using strict comparison within ±lookback window. */
-    public static List<Pivot> findPivots(List<Double> series, int lookback, boolean highs, int minLength) {
-        if (series == null || series.size() < (2 * lookback + 1)) return Collections.emptyList();
-        int n = series.size();
-        List<Pivot> pivots = new ArrayList<>();
+        public boolean plotBull = true;
+        public boolean plotHiddenBull = true;
+        public boolean plotBear = true;
+        public boolean plotHiddenBear = true;
 
-        for (int i = lookback; i <= n - 1 - lookback; i++) {
+        // Colors (optional; used by draw helpers)
+        public Color bearColor = Color.RED;
+        public Color bullColor = new Color(0, 128, 0);
+        public Color hiddenBullColor = new Color(0, 128, 0, 100);
+        public Color hiddenBearColor = new Color(255, 0, 0, 100);
+
+        public Config() {}
+    }
+
+    private static final double EPS = 1e-12;
+
+    /** Returns center indices where series[i] is a local low within [i-lbL, i+lbR], strict compare. */
+    private static List<Integer> pivotLowsIndices(List<Double> series, int lbL, int lbR) {
+        List<Integer> out = new ArrayList<>();
+        if (series == null || series.size() < lbL + lbR + 1) return out;
+        final int n = series.size();
+        for (int i = lbL; i <= n - 1 - lbR; i++) {
             Double v = series.get(i);
             if (v == null) continue;
             boolean ok = true;
-            for (int j = i - lookback; j <= i + lookback; j++) {
+            for (int j = i - lbL; j <= i + lbR; j++) {
                 if (j == i) continue;
                 Double w = series.get(j);
-                if (w == null) { ok = false; break; }
-                if (highs) { if (!(v > w + EPS)) { ok = false; break; } }
-                else       { if (!(v < w - EPS)) { ok = false; break; } }
+                if (w == null || !(v < w - EPS)) { ok = false; break; }
             }
-            if (ok) pivots.add(new Pivot(i, v));
+            if (ok) out.add(i);
         }
-
-        // Enforce min spacing; keep more extreme when crowded
-        if (minLength > 0 && pivots.size() > 1) {
-            List<Pivot> filtered = new ArrayList<>();
-            Pivot last = null;
-            for (Pivot p : pivots) {
-                if (last == null || (p.index - last.index) >= minLength) {
-                    filtered.add(p);
-                    last = p;
-                } else {
-                    if (highs ? (p.value > last.value) : (p.value < last.value)) {
-                        filtered.set(filtered.size() - 1, p);
-                        last = p;
-                    }
-                }
-            }
-            pivots = filtered;
-        }
-
-        return pivots;
+        return out;
     }
 
-    /** Detects regular divergences (bearish: price HH + RSI LH, bullish: price LL + RSI HL). */
-    public static List<Divergence> detectRegularDivergences(
+    /** Returns center indices where series[i] is a local high within [i-lbL, i+lbR], strict compare. */
+    private static List<Integer> pivotHighsIndices(List<Double> series, int lbL, int lbR) {
+        List<Integer> out = new ArrayList<>();
+        if (series == null || series.size() < lbL + lbR + 1) return out;
+        final int n = series.size();
+        for (int i = lbL; i <= n - 1 - lbR; i++) {
+            Double v = series.get(i);
+            if (v == null) continue;
+            boolean ok = true;
+            for (int j = i - lbL; j <= i + lbR; j++) {
+                if (j == i) continue;
+                Double w = series.get(j);
+                if (w == null || !(v > w + EPS)) { ok = false; break; }
+            }
+            if (ok) out.add(i);
+        }
+        return out;
+    }
+
+    private static boolean inRange(int deltaBars, int rangeLower, int rangeUpper) {
+        return deltaBars >= rangeLower && deltaBars <= rangeUpper;
+    }
+
+    private static Double val(List<Double> a, int i) {
+        return (i >= 0 && i < a.size()) ? a.get(i) : null;
+    }
+
+    /**
+     * Detect divergences exactly like the Pine script:
+     * - Pivots are computed on RSI
+     * - Comparisons use values at RSI pivot centers for both RSI and price
+     * - Range filter uses spacing between consecutive RSI pivots
+     *
+     * Inputs must be aligned (one value per candle).
+     *
+     * @param close Close prices (unused in comparisons but kept for completeness)
+     * @param high  High prices
+     * @param low   Low prices
+     * @param rsi   RSI series
+     * @param cfg   Config (lbL, lbR, ranges, toggles)
+     * @return list of divergences (filtered by toggles)
+     */
+    public static List<Divergence> detectDivergences(
             List<Double> close,
+            List<Double> high,
+            List<Double> low,
             List<Double> rsi,
-            int lookback,
-            int minLength
+            Config cfg
     ) {
-        if (close == null || rsi == null || close.size() != rsi.size()) return Collections.emptyList();
-
-        List<Pivot> priceHighs = findPivots(close, lookback, true,  minLength);
-        List<Pivot> priceLows  = findPivots(close, lookback, false, minLength);
-        List<Pivot> rsiHighs   = findPivots(rsi,   lookback, true,  minLength);
-        List<Pivot> rsiLows    = findPivots(rsi,   lookback, false, minLength);
-
         List<Divergence> out = new ArrayList<>();
+        if (high == null || low == null || rsi == null) return out;
+        int n = rsi.size();
+        if (high.size() != n || low.size() != n) return out;
 
-        // Bearish (match consecutive price highs with nearest RSI highs)
-        for (int k = 1; k < priceHighs.size(); k++) {
-            Pivot p1 = priceHighs.get(k - 1);
-            Pivot p2 = priceHighs.get(k);
-            Pivot r1 = nearestPivotAround(rsiHighs, p1.index, lookback);
-            Pivot r2 = nearestPivotAround(rsiHighs, p2.index, lookback);
-            if (r1 == null || r2 == null || r2.index <= r1.index) continue;
+        // RSI pivots (centers)
+        final List<Integer> plCenters = pivotLowsIndices(rsi, cfg.lbL, cfg.lbR);
+        final List<Integer> phCenters = pivotHighsIndices(rsi, cfg.lbL, cfg.lbR);
 
-            boolean priceHH = p2.value > p1.value + EPS;
-            boolean rsiLH   = r2.value < r1.value - EPS;
-            if (priceHH && rsiLH) out.add(new Divergence(DivergenceType.BEARISH_REGULAR, p1, p2, r1, r2));
+        // ----- Regular & Hidden Bullish (use RSI pivot lows) -----
+        if (!plCenters.isEmpty()) {
+            int prev = -1;
+            for (int idx = 0; idx < plCenters.size(); idx++) {
+                int curr = plCenters.get(idx);
+                if (prev >= 0) {
+                    int barsBetweenCenters = curr - prev; // == Pine's barssince(plFound[1]) distance
+                    if (inRange(barsBetweenCenters, cfg.rangeLower, cfg.rangeUpper)) {
+                        Double rPrev = val(rsi, prev);
+                        Double rCurr = val(rsi, curr);
+                        Double pPrev = val(low, prev);
+                        Double pCurr = val(low, curr);
+                        if (rPrev != null && rCurr != null && pPrev != null && pCurr != null) {
+                            // Regular Bullish: price LL & RSI HL
+                            if (cfg.plotBull) {
+                                boolean priceLL = pCurr < pPrev - EPS;
+                                boolean rsiHL   = rCurr > rPrev + EPS;
+                                if (priceLL && rsiHL) {
+                                    out.add(new Divergence(
+                                            DivergenceType.REGULAR_BULLISH, prev, curr,
+                                            pPrev, pCurr, rPrev, rCurr));
+                                }
+                            }
+                            // Hidden Bullish: price HL & RSI LL
+                            if (cfg.plotHiddenBull) {
+                                boolean priceHL = pCurr > pPrev + EPS;
+                                boolean rsiLL   = rCurr < rPrev - EPS;
+                                if (priceHL && rsiLL) {
+                                    out.add(new Divergence(
+                                            DivergenceType.HIDDEN_BULLISH, prev, curr,
+                                            pPrev, pCurr, rPrev, rCurr));
+                                }
+                            }
+                        }
+                    }
+                }
+                prev = curr;
+            }
         }
 
-        // Bullish (match consecutive price lows with nearest RSI lows)
-        for (int k = 1; k < priceLows.size(); k++) {
-            Pivot p1 = priceLows.get(k - 1);
-            Pivot p2 = priceLows.get(k);
-            Pivot r1 = nearestPivotAround(rsiLows, p1.index, lookback);
-            Pivot r2 = nearestPivotAround(rsiLows, p2.index, lookback);
-            if (r1 == null || r2 == null || r2.index <= r1.index) continue;
-
-            boolean priceLL = p2.value < p1.value - EPS;
-            boolean rsiHL   = r2.value > r1.value + EPS;
-            if (priceLL && rsiHL) out.add(new Divergence(DivergenceType.BULLISH_REGULAR, p1, p2, r1, r2));
+        // ----- Regular & Hidden Bearish (use RSI pivot highs) -----
+        if (!phCenters.isEmpty()) {
+            int prev = -1;
+            for (int idx = 0; idx < phCenters.size(); idx++) {
+                int curr = phCenters.get(idx);
+                if (prev >= 0) {
+                    int barsBetweenCenters = curr - prev;
+                    if (inRange(barsBetweenCenters, cfg.rangeLower, cfg.rangeUpper)) {
+                        Double rPrev = val(rsi, prev);
+                        Double rCurr = val(rsi, curr);
+                        Double pPrev = val(high, prev);
+                        Double pCurr = val(high, curr);
+                        if (rPrev != null && rCurr != null && pPrev != null && pCurr != null) {
+                            // Regular Bearish: price HH & RSI LH
+                            if (cfg.plotBear) {
+                                boolean priceHH = pCurr > pPrev + EPS;
+                                boolean rsiLH   = rCurr < rPrev - EPS;
+                                if (priceHH && rsiLH) {
+                                    out.add(new Divergence(
+                                            DivergenceType.REGULAR_BEARISH, prev, curr,
+                                            pPrev, pCurr, rPrev, rCurr));
+                                }
+                            }
+                            // Hidden Bearish: price LH & RSI HH
+                            if (cfg.plotHiddenBear) {
+                                boolean priceLH = pCurr < pPrev - EPS;
+                                boolean rsiHH   = rCurr > rPrev + EPS;
+                                if (priceLH && rsiHH) {
+                                    out.add(new Divergence(
+                                            DivergenceType.HIDDEN_BEARISH, prev, curr,
+                                            pPrev, pCurr, rPrev, rCurr));
+                                }
+                            }
+                        }
+                    }
+                }
+                prev = curr;
+            }
         }
 
-        // chronological
+        // Chronological like Pine (by newer pivot center)
         out.sort(Comparator.comparingInt(d -> d.endIndex));
         return out;
     }
 
-    private static Pivot nearestPivotAround(List<Pivot> pivots, int idx, int window) {
-        Pivot best = null; int bestDist = Integer.MAX_VALUE;
-        for (Pivot p : pivots) {
-            int d = Math.abs(p.index - idx);
-            if (d <= window && d < bestDist) { best = p; bestDist = d; }
-        }
-        return best;
-    }
+    // ========================= Draw Helpers (optional) =========================
 
-    // =============== DRAW HELPERS ============================
-
-    private static double xToPixel(double xCandleCoord, int n, int plotX, int plotW) {
-        return plotX + (xCandleCoord / (double) n) * plotW;
-    }
-
-    private static int rsiToPixel(double value, int plotY, int plotH) {
-        double norm = value / 100.0;
-        return plotY + (int) Math.round(plotH - norm * plotH);
-    }
-
-    /** Draws divergence slanted lines + labels onto the RSI panel. */
+    /**
+     * Draw divergence lines and labels on an RSI pane.
+     * @param g       Graphics2D
+     * @param divs    divergences (from detectAllLikePine)
+     * @param rsi     RSI series
+     * @param n       total candle count
+     * @param plotX   left x of RSI plot area
+     * @param plotW   width of RSI plot area
+     * @param rsiY    top y of RSI plot area
+     * @param rsiH    height of RSI plot area
+     * @param cfg     config for colors
+     */
     public static void drawDivergencesOnRsi(Graphics2D g,
-                                            List<Divergence> divergences,
-                                            List<Double> rsiSeries, // aligned to candles
-                                            int n,
-                                            int plotX, int plotW,
-                                            int rsiY, int rsiH) {
-        if (divergences == null || divergences.isEmpty() || rsiSeries == null) return;
+                                     List<Divergence> divs,
+                                     List<Double> rsi,
+                                     int n,
+                                     int plotX, int plotW,
+                                     int rsiY, int rsiH,
+                                     Config cfg) {
+        if (divs == null || divs.isEmpty() || rsi == null) return;
 
         Stroke oldStroke = g.getStroke();
         Font oldFont = g.getFont();
-        g.setFont(new Font("SansSerif", Font.BOLD, 20));
+        g.setFont(new Font("SansSerif", Font.BOLD, 18));
 
-        for (Divergence d : divergences) {
-            int x1 = (int) xToPixel(d.startIndex + 0.5, n, plotX, plotW);
-            int x2 = (int) xToPixel(d.endIndex   + 0.5, n, plotX, plotW);
-
-            Double r1 = safeGet(rsiSeries, d.startIndex);
-            Double r2 = safeGet(rsiSeries, d.endIndex);
+        for (Divergence d : divs) {
+            Double r1 = val(rsi, d.startIndex);
+            Double r2 = val(rsi, d.endIndex);
             if (r1 == null || r2 == null) continue;
 
+            int x1 = (int) (plotX + ((d.startIndex + 0.5) / (double) n) * plotW);
+            int x2 = (int) (plotX + ((d.endIndex   + 0.5) / (double) n) * plotW);
             int y1 = rsiToPixel(r1, rsiY, rsiH);
             int y2 = rsiToPixel(r2, rsiY, rsiH);
 
-            Color col = (d.type == DivergenceType.BEARISH_REGULAR) ? Color.RED : new Color(0, 153, 0);
-            g.setColor(col);
+            Color c = switch (d.type) {
+                case REGULAR_BULLISH -> cfg.bullColor;
+                case HIDDEN_BULLISH -> cfg.hiddenBullColor;
+                case REGULAR_BEARISH -> cfg.bearColor;
+                case HIDDEN_BEARISH -> cfg.hiddenBearColor;
+            };
+
+            g.setColor(c);
             g.setStroke(new BasicStroke(2.5f));
             g.drawLine(x1, y1, x2, y2);
-
-            String label = (d.type == DivergenceType.BEARISH_REGULAR) ? "Bearish div" : "Bullish div";
-            g.drawString(label, x2 + 6, y2 - 6);
+            g.drawString(labelFor(d.type), x2 + 6, y2 - 6);
         }
 
         g.setStroke(oldStroke);
         g.setFont(oldFont);
     }
 
-    private static Double safeGet(List<Double> list, int idx) {
-        return (idx >= 0 && idx < list.size()) ? list.get(idx) : null;
+    private static int rsiToPixel(double value, int plotY, int plotH) {
+        double norm = Math.max(0.0, Math.min(100.0, value)) / 100.0;
+        return plotY + (int) Math.round(plotH - norm * plotH);
     }
 
-    /** Utility: pad/align RSI to length n (filling missing with null). */
+    private static String labelFor(DivergenceType t) {
+        return switch (t) {
+            case REGULAR_BULLISH -> "Bull";
+            case HIDDEN_BULLISH  -> "H Bull";
+            case REGULAR_BEARISH -> "Bear";
+            case HIDDEN_BEARISH  -> "H Bear";
+        };
+    }
+
+    // ========================= Utilities =========================
+
+    /** Pads/aligns a list to length n (filling missing with null). */
     public static List<Double> alignToLength(List<Double> in, int n) {
         List<Double> out = new ArrayList<>(n);
-        for (int i = 0; i < n; i++) out.add((i < in.size()) ? in.get(i) : null);
+        for (int i = 0; i < n; i++) out.add((in != null && i < in.size()) ? in.get(i) : null);
         return out;
     }
 }

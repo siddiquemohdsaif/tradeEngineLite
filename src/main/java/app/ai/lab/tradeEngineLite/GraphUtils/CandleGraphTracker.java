@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 
+import app.ai.lab.tradeEngineLite.GraphUtils.RsiUtils.Config;
+
 import java.awt.*;
 import java.awt.geom.Path2D;
 import java.awt.image.BufferedImage;
@@ -188,6 +190,7 @@ public class CandleGraphTracker {
     // NEW: externalized RSI engine + divergences
     private RsiUtils.RsiState rsiState = null; // >>> NEW
     private boolean rsiDivergenceEnabled = false; // >>> NEW
+    private Config rsiDivConfig = new Config();
     private List<RsiUtils.Divergence> rsiDivergences = new ArrayList<>(); // >>> NEW
 
     // Waves
@@ -570,7 +573,7 @@ public class CandleGraphTracker {
 
                 // Draw divergences (if enabled) // >>> NEW
                 if (rsiDivergenceEnabled && !rsiDivergences.isEmpty()) {
-                    RsiUtils.drawDivergencesOnRsi(g, rsiDivergences, rsiAligned, n, plotX, plotW, rsiY, rsiH);
+                    RsiUtils.drawDivergencesOnRsi(g, rsiDivergences, rsiAligned, n, plotX, plotW, rsiY, rsiH, rsiDivConfig);
                 }
             }
         } finally {
@@ -802,6 +805,10 @@ public class CandleGraphTracker {
         else
             this.rsiState.reset(this.rsiPeriod);
         this.rsiDivergences.clear();
+
+        // if (divergence) {
+        //     rsiDivConfig = conf;
+        // }
     }
 
     public void resetRSI() { // >>> CHANGED
@@ -821,14 +828,23 @@ public class CandleGraphTracker {
 
         // If divergence enabled, recompute full set (cheap for typical sizes)
         if (rsiDivergenceEnabled) {
-            // Collect closes and aligned rsi
-            int n = candles.size();
+            final int n = candles.size();
+
+            // Collect OHLC arrays (index-aligned, closed candles only)
             List<Double> closes = new ArrayList<>(n);
-            for (int i = 0; i < n; i++)
-                closes.add(candles.get(i).close);
+            List<Double> highs  = new ArrayList<>(n);
+            List<Double> lows   = new ArrayList<>(n);
+            for (int i = 0; i < n; i++) {
+                var c = candles.get(i);
+                closes.add(c.close);
+                highs.add(c.high);
+                lows.add(c.low);
+            }
+        
+            // Align RSI to candle count (early entries can be null until seeding completes)
             List<Double> rsiAligned = RsiUtils.alignToLength(rsiState.getValues(), n);
             // Zerodha-like: lookback=5, minLength=5
-            rsiDivergences = RsiUtils.detectRegularDivergences(closes, rsiAligned, 5, 5);
+            rsiDivergences = RsiUtils.detectDivergences(closes,highs,lows,rsiAligned,rsiDivConfig);
         }
     }
 

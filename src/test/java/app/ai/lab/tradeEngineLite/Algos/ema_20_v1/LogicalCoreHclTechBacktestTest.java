@@ -73,7 +73,7 @@ class LogicalCoreHclTechBacktestTest {
         );
 
         // ⚠️ Use a valid Zerodha enctoken. Reuse the one from your other tests or inject via env/secret.
-        final String ENCTOKEN = "pKoAsMemJ8ahCjb4odctlzI+4n/qQ6lYWrTyrPHmfNOzmQTIpbXtsE+eWAXKIfo6I8WO9Gkd6kjCdZY0CvrQJPjwNjQZW/rCDjFAbof9BD1AdYrAr/6RGA==";
+        final String ENCTOKEN = "MZLT4joHBvUsIZVb720PfKZENuD2hcu/buw4PlsxlspbWeBr6wXpZJvKjHZhUfAQzO2fJE4OsPokWYq1p1nhMs6FdBuykeTldqCrQOR0lcwfuLHl1eIIBg==";
 
         // Stream 1-minute candles as ticks; isIndex=false for an equity symbol
         streamer.stream_zerodha(ENCTOKEN, token, 1, false);
