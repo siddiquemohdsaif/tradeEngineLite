@@ -254,6 +254,10 @@ public class CandleGraphTracker {
         return v.get(v.size() - 1); // last closed candle's RSI
     }
 
+    public List<Double> getRSIValues() {
+        return rsiState.getValues();
+    }
+
     public void drawCandleGraph(String outputDir) throws IOException {
         if (!outputDir.endsWith(File.separator))
             outputDir += File.separator;
