@@ -14,13 +14,13 @@ import static org.junit.jupiter.api.Assertions.*;
 
 public class HistoricalCandleFetcherTest {
 
-    private final String enctoken = "fZrhqbu1m+n11c5GdFMAzQVXKv+ZvD+tkWEVHjZsozozCH6Op4QEFDjps5ahUs3GOZQea86u6icXM1XOg2jdINbugX7yTvkgYOVbwMZk3QcNjpC9X2MZvA==";
+    private final String enctoken = "d06cU1/Ii9IWa7JXD/Tz3wEF3g2C5DKjae9XaK1oJvMjFFORfeHGPNk2vXAM8RfyCTW5CVx6YLFXlMQtnFSOiS+cTL9WD0xqulInXBf9kf396DRTGW9NFg==";
 
     @Test
     public void testFetchCandles() throws Exception {
         HistoricalCandleFetcherZerodha fetcher = new HistoricalCandleFetcherZerodha(enctoken);
 
-        int instrumentId = 256265; // NIFTY 50 (example)
+        int instrumentId = 1195009; // NIFTY 50 (example)
         int timeFrame = 15;
         String from = "2025-09-05";
         String to = "2025-09-06";

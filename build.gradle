@@ -1,7 +1,7 @@
 plugins {
-	id 'java'
-	id 'org.springframework.boot' version '3.5.5'
-	id 'io.spring.dependency-management' version '1.1.7'
+    id 'java'
+    id 'org.springframework.boot' version '3.5.5'
+    id 'io.spring.dependency-management' version '1.1.7'
 }
 
 group = 'app.ai.lab'
@@ -9,9 +9,9 @@ version = '0.0.1-SNAPSHOT'
 description = 'Spring Boot - trade engine'
 
 java {
-	toolchain {
-		languageVersion = JavaLanguageVersion.of(17)
-	}
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
 }
 
 repositories {
@@ -19,21 +19,23 @@ repositories {
 }
 
 dependencies {
-	implementation 'org.springframework.boot:spring-boot-starter'
+    implementation 'org.springframework.boot:spring-boot-starter'
     
     // ✅ Required for RestTemplate, HttpHeaders, etc.
     implementation 'org.springframework.boot:spring-boot-starter-web'
-	
+
     // JSON (Jackson)
     implementation 'com.fasterxml.jackson.core:jackson-databind'
     implementation 'com.fasterxml.jackson.core:jackson-annotations'
     implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310' // Java time support
 
+    // ✅ JFreeChart for graphs
+    implementation 'org.jfree:jfreechart:1.5.4'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
-	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 tasks.named('test') {
-	useJUnitPlatform()
+    useJUnitPlatform()
 }

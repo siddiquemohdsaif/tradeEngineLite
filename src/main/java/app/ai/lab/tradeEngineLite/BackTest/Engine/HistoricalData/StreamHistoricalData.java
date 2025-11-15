@@ -234,6 +234,120 @@ public class StreamHistoricalData {
             try { callback.onEnd(); } catch (Exception ignore) {}
         }
     }
+
+
+    /**
+     * Stream Groww historical candles as synthetic ticks (O, L, H, C),
+     * producing 4 Blocks per candle in that order, chunked into <=60-day ranges.
+     *
+     * @param stockSymbol      Groww symbol (e.g., "INDUSINDBK", "HDFCBANK")
+     * @param instrumentId     Zerodha instrument token (index token or stock token)
+     * @param timeFrameMinutes Candle interval in minutes (1, 5, 15, 60, 1440)
+     * @param isIndex          true -> emit IndexPacket; false -> emit StockPacket
+     */
+    public void stream_groww(String stockSymbol, int instrumentId, int timeFrameMinutes, boolean isIndex) {
+        final HistoricalCandleFetcherGroww api = new HistoricalCandleFetcherGroww();
+    
+        java.time.LocalDate cursor = startDate;
+        try {
+            while (!cursor.isAfter(endDate)) {
+                java.time.LocalDate chunkEnd = cursor.plusDays(MAX_ZERODHA_DAYS_PER_CALL - 1);
+                if (timeFrameMinutes == 1440) {
+                    chunkEnd = cursor.plusDays(MAX_ZERODHA_DAYS_PER_CALL*3 - 1);
+                }
+                if (chunkEnd.isAfter(endDate)) chunkEnd = endDate;
+            
+                final String fromIst = cursor.toString();   // yyyy-MM-dd
+                final String toIst   = chunkEnd.toString(); // yyyy-MM-dd
+            
+                try {
+                    final java.util.List<HistoricalCandleFetcherZerodha.Candle> candles =
+                            api.fetchCandlesAsZerodhaPojo(stockSymbol, fromIst, toIst, timeFrameMinutes);
+                
+                    for (HistoricalCandleFetcherZerodha.Candle c : candles) {
+                        final long baseMs   = parseZerodhaTsToEpochMs(c.timestamp); // "yyyy-MM-dd'T'HH:mm:ss+0530"
+                    
+                        // --- NEW: for daily candles, place the 4 ticks at 09:15, 11:00, 14:00, 15:30 IST ---
+                        final long[] tickTimesMs;
+                        if (timeFrameMinutes == 1440) {
+                            java.time.LocalDate day = java.time.Instant.ofEpochMilli(baseMs)
+                                    .atZone(DEFAULT_ZONE)
+                                    .toLocalDate();
+                        
+                            tickTimesMs = new long[] {
+                                    java.time.ZonedDateTime.of(day, java.time.LocalTime.of(9, 15),  DEFAULT_ZONE).toInstant().toEpochMilli(),
+                                    java.time.ZonedDateTime.of(day, java.time.LocalTime.of(11, 0),  DEFAULT_ZONE).toInstant().toEpochMilli(),
+                                    java.time.ZonedDateTime.of(day, java.time.LocalTime.of(14, 0),  DEFAULT_ZONE).toInstant().toEpochMilli(),
+                                    java.time.ZonedDateTime.of(day, java.time.LocalTime.of(15, 30), DEFAULT_ZONE).toInstant().toEpochMilli()
+                            };
+                        } else {
+                            // intraday: keep previous behavior (4 ticks spaced by +i ms for determinism)
+                            tickTimesMs = new long[] { baseMs, baseMs + 1, baseMs + 2, baseMs + 3 };
+                        }
+                    
+                        final double[] ticks = new double[] { c.open, c.low, c.high, c.close };
+                    
+                        for (int i = 0; i < ticks.length; i++) {
+                            final long tsMs    = tickTimesMs[i];
+                            final long epochSec = tsMs / 1000L;
+                            final long priceU32 = toU32Price(ticks[i]);
+                        
+                            Block.PacketData pd;
+                            if (isIndex) {
+                                Block.IndexPacket ip = new Block.IndexPacket();
+                                ip.setToken(instrumentId);
+                                ip.setLastTradedPrice(priceU32);
+                                ip.setExchangeTimestamp(epochSec);
+                                pd = ip;
+                            } else {
+                                Block.StockPacket sp = new Block.StockPacket();
+                                sp.setInstrumentToken(instrumentId);
+                                sp.setLastTradedPrice(priceU32);
+                                sp.setExchangeTimestamp(epochSec);
+                                sp.setVolumeTraded(c.volume);
+                                sp.setOpenInterest(c.oi); // 0L via adapter
+                                sp.setMarketDepth(java.util.Collections.emptyList());
+                                pd = sp;
+                            }
+                        
+                            Block block = new Block(tsMs, java.util.Collections.singletonList(pd));
+                            boolean keep = callback.onBlock(block);
+                            if (!keep) {
+                                try { callback.onEnd(); } catch (Exception ignore) {}
+                                return;
+                            }
+                        
+                            if (delayMs >= 0) {
+                                try { Thread.sleep(delayMs); }
+                                catch (InterruptedException ie) {
+                                    Thread.currentThread().interrupt();
+                                    try { callback.onEnd(); } catch (Exception ignore) {}
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    // Non-fatal: report and continue to next chunk.
+                    callback.onError(e, rootDir);
+                }
+            
+                if (chunkEnd.isBefore(endDate)) {
+                    try { Thread.sleep(CHUNK_THROTTLE_MS); }
+                    catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        try { callback.onEnd(); } catch (Exception ignore) {}
+                        return;
+                    }
+                }
+            
+                cursor = chunkEnd.plusDays(1);
+            }
+        } finally {
+            try { callback.onEnd(); } catch (Exception ignore) {}
+        }
+    }
+
     
     // ---- helpers (keep inside StreamHistoricalData) ----
     
