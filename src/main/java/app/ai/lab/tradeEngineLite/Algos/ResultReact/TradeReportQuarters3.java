@@ -66,7 +66,7 @@ public class TradeReportQuarters3 {
 
     public static void main(String[] args) throws Exception {
         // Base folder where all symbol folders (HCLTECH, INFY, MPHASIS, etc.) exist
-        Path baseDir = Paths.get("D:\\SpringBoot project\\Trade\\output files\\tradeInfo\\ResultReact");
+        Path baseDir = Paths.get("D:\\SpringBoot project\\Trade\\output files\\tradeInfo\\ResultReact_futv3");
 
         String startQuarter = "2020-Jun";
         String endQuarter   = "2025-Jun";
@@ -147,6 +147,9 @@ public class TradeReportQuarters3 {
         // For all trades that pass filters (side, quarter range, dateRange logic)
         Map<LocalDate, Integer> dailyActiveTrades = new TreeMap<>();
 
+                // For trading-days distribution statistics (per trade)
+        List<Long> tradingDaysPerTrade = new ArrayList<>();
+
         // Walk through each symbol folder (HCLTECH, INFY, etc.)
         try (DirectoryStream<Path> symbolDirs = Files.newDirectoryStream(baseDir)) {
             for (Path symbolDir : symbolDirs) {
@@ -218,6 +221,9 @@ public class TradeReportQuarters3 {
                             days = (exitMs - entryMs) / MILLIS_PER_DAY;
                         }
 
+                        // Collect per-trade trading days for statistics
+                        tradingDaysPerTrade.add(days);
+
                         // Aggregate by quarter
                         QuarterAgg agg = aggMap.computeIfAbsent(qKey, k -> new QuarterAgg(k.toLabel(), typeWanted));
                         agg.tradeCount++;
@@ -271,6 +277,11 @@ public class TradeReportQuarters3 {
         summary.put("overall_sum_pnl", round3(overallSumPnl));
         summary.put("overall_trading_days_use", totalDays);
 
+        // NEW: trading days distribution stats
+        Map<String, Object> tradingDaysStats = computeTradingDaysStats(tradingDaysPerTrade);
+        summary.put("trading_days_used", tradingDaysStats);
+
+
         out.put("summary", summary);
 
         // Output file name for JSON
@@ -292,6 +303,69 @@ public class TradeReportQuarters3 {
     }
 
     // ===== Helpers =====
+
+        // Compute avg, median, 90th and 70th percentile over per-trade trading days
+    private static Map<String, Object> computeTradingDaysStats(List<Long> daysList) {
+        Map<String, Object> stats = new LinkedHashMap<>();
+        if (daysList == null || daysList.isEmpty()) {
+            stats.put("avg", 0.0);
+            stats.put("median", 0.0);
+            stats.put("90_percentile", 0.0);
+            stats.put("70_percentile", 0.0);
+            return stats;
+        }
+
+        // Sort a copy
+        List<Long> sorted = new ArrayList<>(daysList);
+        Collections.sort(sorted);
+
+        int n = sorted.size();
+
+        // Sum for average
+        long sum = 0L;
+        for (Long v : sorted) {
+            sum += (v == null ? 0L : v);
+        }
+        double avg = BigDecimal.valueOf(sum)
+                .divide(BigDecimal.valueOf(n), 3, RoundingMode.HALF_UP)
+                .doubleValue();
+
+        // Median
+        double median;
+        if (n % 2 == 1) {
+            median = sorted.get(n / 2);
+        } else {
+            long a = sorted.get(n / 2 - 1);
+            long b = sorted.get(n / 2);
+            median = BigDecimal.valueOf(a + b)
+                    .divide(BigDecimal.valueOf(2), 3, RoundingMode.HALF_UP)
+                    .doubleValue();
+        }
+
+        double p90 = percentile(sorted, 90);
+        double p70 = percentile(sorted, 70);
+
+        stats.put("avg", avg);
+        stats.put("median", median);
+        stats.put("90_percentile", p90);
+        stats.put("70_percentile", p70);
+
+        return stats;
+    }
+
+    // Simple percentile function on sorted list (ascending), returns double
+    private static double percentile(List<Long> sorted, int percentile) {
+        if (sorted == null || sorted.isEmpty()) return 0.0;
+        if (percentile <= 0) return sorted.get(0);
+        if (percentile >= 100) return sorted.get(sorted.size() - 1);
+
+        int n = sorted.size();
+        double rank = (percentile / 100.0) * n;
+        int idx = (int) Math.ceil(rank) - 1;
+        if (idx < 0) idx = 0;
+        if (idx >= n) idx = n - 1;
+        return sorted.get(idx);
+    }
 
     private static QuarterKey parseQuarter(String s) {
         if (s == null) return null;

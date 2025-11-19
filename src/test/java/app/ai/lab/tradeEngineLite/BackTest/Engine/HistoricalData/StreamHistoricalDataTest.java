@@ -120,7 +120,7 @@ class StreamHistoricalDataTest {
                                 int n = indexSeen.incrementAndGet();
 
                                 if (ip.getToken() != 256265  ) {
-                                    return true;
+                                    continue;
                                 }
                                 System.out.printf(
                                         "IndexPkt #%d  blockTs=%d (%s)  token=%d  ltp=%d  o=%d  h=%d  l=%d  c=%d  chg=%d  exTs=%d %n",
@@ -148,6 +148,72 @@ class StreamHistoricalDataTest {
                     @Override
                     public void onEnd() {
                         System.out.println("Stream ended. Total index packets printed: " + indexSeen.get());
+                    }
+                }
+        );
+
+        streamer.stream();
+        assertTrue(indexSeen.get() >= 0, "Should see zero or more index packets without hard failure");
+    }
+
+
+
+        
+    @Test
+    void smokeStream_FirstFewBlocks_Nifty100_printStockPackets() {
+        Path root = Path.of("D:\\Node Project\\Trading\\IntraDay record\\ticker_historic_data");
+        Assumptions.assumeTrue(Files.isDirectory(root), "Test data folder not found: " + root);
+
+        AtomicInteger indexSeen = new AtomicInteger();
+
+        StreamHistoricalData streamer = new StreamHistoricalData(
+                root,
+                "15-10-25",
+                "15-10-25",
+                "NIFTY_100",
+                -1, // no delay
+                new StreamHistoricalData.BlockCallback() {
+                    @Override
+                    public boolean onBlock(Block block) {
+                        if (block.getInfo() == null || block.getInfo().isEmpty()) return true;
+
+                        long blockTs = block.getTimeStamp();
+                        String blockTsStr = FMT.format(Instant.ofEpochMilli(blockTs));
+
+                        for (Block.PacketData pd : block.getInfo()) {
+                            if (pd instanceof Block.StockPacket ip) {
+
+                                if (ip.getInstrumentToken() != 4701441  ) {
+                                    continue;
+                                }
+                                int n = indexSeen.incrementAndGet();
+
+                                System.out.printf(
+                                        "IndexPkt #%d  blockTs=%d (%s)  token=%d  ltp=%d  o=%d  h=%d  l=%d  c=%d  vol=%d  exTs=%d %n",
+                                        n,
+                                        blockTs, blockTsStr,
+                                        ip.getInstrumentToken(),
+                                        ip.getLastTradedPrice(),
+                                        ip.getOpenPrice(),
+                                        ip.getHighPrice(),
+                                        ip.getLowPrice(),
+                                        ip.getClosePrice(),
+                                        ip.getVolumeTraded(),
+                                        ip.getExchangeTimestamp()
+                                );
+                            }
+                        }
+                        return true;// continue streaming
+                    }
+
+                    @Override
+                    public void onError(Exception e, Path source) {
+                        System.err.println("Error: " + e + " at " + source);
+                    }
+
+                    @Override
+                    public void onEnd() {
+                        System.out.println("Stream ended. Total index packets printed:  " + indexSeen.get());
                     }
                 }
         );
